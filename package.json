@@ -1,0 +1,21 @@
+{
+  "name": "ptt-prototype",
+  "version": "1.0.0",
+  "description": "一鍵對講 PTT 網頁原型",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/e2e.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "ws": "^8.22.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

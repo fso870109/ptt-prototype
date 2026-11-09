@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="/style.css">
+<title>一鍵對講 PTT 原型</title>
+</head>
+<body>
+<!-- 登入 -->
+<section id="login" class="screen">
+  <div class="login-card">
+    <div class="logo">📻</div>
+    <h1>一鍵對講</h1>
+    <p class="sub">PTT 原型 · 第一階段</p>
+    <input id="nick" maxlength="20" placeholder="輸入你的暱稱" autocomplete="nickname">
+    <button id="enter" class="primary">進入</button>
+    <p class="hint">按「進入」時會啟用聲音播放；第一次按住講話時瀏覽器會詢問麥克風權限。</p>
+  </div>
+</section>
+
+<!-- 主畫面 -->
+<section id="main" class="screen hidden">
+  <header class="topbar">
+    <div class="conn"><span id="connDot" class="dot off"></span><span id="connText">未連線</span></div>
+    <div class="me"><span id="meName"></span> <button id="logout" class="link">登出</button></div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="channels" class="active">頻道</button>
+    <button data-tab="members">成員</button>
+    <button data-tab="dms">私訊 <span id="dmBadge" class="badge hidden"></span></button>
+  </nav>
+
+  <div class="panel" id="tab-channels">
+    <div class="row">
+      <input id="newChannel" maxlength="30" placeholder="新頻道名稱">
+      <button id="createChannel">建立</button>
+    </div>
+    <ul id="channelList" class="list"></ul>
+  </div>
+  <div class="panel hidden" id="tab-members">
+    <p class="muted small">目前頻道的線上成員，點一下即可一對一私人對講</p>
+    <ul id="memberList" class="list"></ul>
+    <p class="muted small">其他線上的人</p>
+    <ul id="otherList" class="list"></ul>
+  </div>
+  <div class="panel hidden" id="tab-dms">
+    <ul id="dmList" class="list"></ul>
+  </div>
+
+  <div class="target">
+    <div id="targetLabel" class="target-label">尚未加入頻道</div>
+    <button id="backToChannel" class="link hidden">← 回到頻道</button>
+  </div>
+
+  <div class="ptt-wrap">
+    <div id="talkStatus" class="talk-status">&nbsp;</div>
+    <button id="ptt" class="ptt" disabled>
+      <span class="ptt-icon">🎙️</span>
+      <span id="pttText">按住講話</span>
+    </button>
+    <div id="meter" class="meter"><div id="meterBar"></div></div>
+  </div>
+
+  <div class="history">
+    <div class="history-head">
+      <strong>語音紀錄</strong>
+      <button id="playUnread" class="small-btn hidden">▶ 播放未聽 (<span id="unreadCount">0</span>)</button>
+    </div>
+    <ul id="historyList" class="hist"></ul>
+  </div>
+</section>
+
+<div id="toast" class="toast hidden"></div>
+<audio id="player" preload="none" playsinline></audio>
+<script src="/app.js"></script>
+</body>
+</html>
