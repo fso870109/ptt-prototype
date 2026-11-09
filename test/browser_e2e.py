@@ -17,6 +17,8 @@ users = {}
 for key, name in [('ba', '小明'), ('bb', '小華')]:
     s, j = api('POST', '/api/admin/users', {'username': f't_{key}_{sfx}', 'displayName': name, 'password': f'{key}-Pass-1234'}, ADM)
     users[name] = {'id': j['user']['id'], 'username': j['user']['username'], 'password': f'{key}-Pass-1234'}
+s, j = api('POST', '/api/admin/users', {'username': f't_dsp_{sfx}', 'displayName': '調度員一', 'password': 'Dsp-Pass-1234', 'role': 'dispatcher'}, ADM)
+users['調度'] = {'id': j['user']['id'], 'username': j['user']['username'], 'password': 'Dsp-Pass-1234'}
 try:
   with sync_playwright() as p:
     b = p.chromium.launch(args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'])
@@ -113,9 +115,27 @@ try:
     _, ul = api('GET', '/api/admin/users', None, ADM)
     for u in ul['users']:
         if u['username'] == f't_ui_{sfx}': users['ui'] = {'id': u['id']}
-    # 非管理員進後台
+    # 調度台
+    dctx = b.new_context(permissions=['microphone'], viewport={'width': 1440, 'height': 900})
+    dp = dctx.new_page(); dp.on('dialog', lambda d: d.accept())
+    dp.goto(BASE + '/dispatch')
+    dp.fill('#username', users['調度']['username']); dp.fill('#password', users['調度']['password']); dp.click('#loginForm button')
+    dp.wait_for_selector('#desk:not(.hidden)', timeout=15000)
+    ok('調度台桌面版顯示頻道清單、佇列與地圖', dp.is_visible('#chList') and dp.is_visible('#queueList') and dp.is_visible('#map') and '大廳' in dp.inner_text('#chList'))
+    A.click('#callDispatch')
+    dp.wait_for_selector('#queueList button[data-pick]', timeout=10000)
+    ok('個人呼叫出現在調度台來電佇列', '小明' in dp.inner_text('#queueList'))
+    dp.click('#queueList button[data-pick]')
+    A.wait_for_function("document.querySelector('#dispatchStatus').textContent.includes('已接聽')", timeout=10000)
+    ok('接聽後呼叫者看到一對一提示', '已接聽' in A.inner_text('#dispatchStatus') and '一對一' in dp.inner_text('#targetLabel'))
+    dp.click('#doneBtn')
+    A.wait_for_function("document.querySelector('#dispatchStatus').classList.contains('hidden') || document.querySelector('#dispatchStatus').textContent === ''", timeout=8000)
+    dp.screenshot(path='test/screenshot_dispatch.png', full_page=True)
+    # 非管理員進後台與調度台
     B.goto(BASE + '/admin'); B.wait_for_selector('#denied:not(.hidden)', timeout=8000)
     ok('非管理員打開 /admin 顯示「需要管理員權限」', B.is_visible('#denied') and B.is_hidden('#panels'))
+    B.goto(BASE + '/dispatch'); B.wait_for_selector('#denied:not(.hidden)', timeout=8000)
+    ok('一般使用者打開 /dispatch 顯示需要調度員權限', B.is_visible('#denied') and B.is_hidden('#desk'))
     bad = [u for u in reqs if '/audio/' in u or '/api/history' in u or u.endswith('.wav')]
     ok('整個過程沒有請求任何錄音或歷史', not bad, f'{len(reqs)} 個請求')
     A.screenshot(path='test/screenshot_A.png'); ap.screenshot(path='test/screenshot_admin.png', full_page=True)

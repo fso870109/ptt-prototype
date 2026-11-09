@@ -162,6 +162,10 @@ function resetSos() { sos.classList.remove('holding'); sos.querySelector('.sos-t
 sos.addEventListener('pointerdown', sosDown);
 sos.addEventListener('pointerup', sosUp); sos.addEventListener('pointercancel', sosUp); sos.addEventListener('lostpointercapture', sosUp);
 sos.addEventListener('contextmenu', (e) => e.preventDefault());
+$('#callDispatch').addEventListener('click', () => {
+  if (!S.connected) return toast('尚未連線');
+  wsSend({ t: 'dispatch_call' });
+});
 function fireAlert() {
   if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
   const sendIt = (pos) => wsSend({ t: 'alert_start', ...(pos ? { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy } : {}) });
@@ -308,8 +312,10 @@ function handle(m) {
       S.authFailed = true; store.token = ''; showLogin(m.reason === 'revoked' ? '你的帳號已被停用或密碼已重設，請重新登入' : '登入已過期，請重新登入'); break;
     case 'welcome':
       S.me = m.user; S.myId = m.user.id; S.channels = m.channels; S.dms = m.dms || []; S.online = m.online || [];
-      $('#meName').textContent = m.user.displayName + (m.user.role === 'admin' ? '（管理員）' : '');
+      $('#meName').textContent = m.user.displayName + (m.user.role === 'admin' ? '（管理員）' : m.user.role === 'dispatcher' ? '（調度員）' : '');
       $('#adminLink').classList.toggle('hidden', m.user.role !== 'admin');
+      $('#dispatchLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'dispatcher');
+      $('#callDispatch').classList.toggle('hidden', m.user.role === 'admin' || m.user.role === 'dispatcher');
       setConn('on', '已連線');
       S.alerts = new Map((m.alerts || []).map(a => [a.id, a])); renderAlerts();
       renderChannels(); renderDms(); renderOthers();
@@ -381,6 +387,33 @@ function handle(m) {
       if (m.message && m.message.conv === currentConv()) {
         if (!S.chat.some(x => x.id === m.message.id)) { S.chat.push(m.message); renderChat(); }
       }
+      break;
+    case 'queue_self':
+      S.dispatchCall = m.item;
+      $('#dispatchStatus').classList.remove('hidden');
+      $('#dispatchStatus').textContent = '已呼叫調度台，等候接聽…';
+      $('#callDispatch').disabled = true;
+      break;
+    case 'dispatch_pickup':
+      S.dispatchCall = m.item;
+      $('#dispatchStatus').classList.remove('hidden');
+      $('#dispatchStatus').textContent = (m.byName || '調度員') + ' 已接聽，現為一對一對講';
+      $('#callDispatch').disabled = true;
+      if (m.by) openDm(m.by, m.byName);
+      break;
+    case 'dispatch_transfer':
+      S.dispatchCall = m.item;
+      $('#dispatchStatus').classList.remove('hidden');
+      $('#dispatchStatus').textContent = '已轉接給 ' + (m.toName || '另一位調度員');
+      $('#callDispatch').disabled = true;
+      if (m.to) openDm(m.to, m.toName);
+      break;
+    case 'dispatch_done':
+      S.dispatchCall = null;
+      $('#dispatchStatus').classList.add('hidden');
+      $('#dispatchStatus').textContent = '';
+      $('#callDispatch').disabled = false;
+      toast('與調度台的通話已結束');
       break;
     case 'error': toast(m.msg); break;
   }

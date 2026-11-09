@@ -58,8 +58,8 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('管理員身分為 admin', meA.body?.user?.role === 'admin');
 
     // ===== 後台：建立使用者與頻道、指派角色 =====
-    const mk = async (key, name, password) => {
-      const r = await http('POST', '/api/admin/users', { username: `t_${key}_${sfx}`, displayName: name, password }, adminTok);
+    const mk = async (key, name, password, role) => {
+      const r = await http('POST', '/api/admin/users', { username: `t_${key}_${sfx}`, displayName: name, password, role }, adminTok);
       if (r.status !== 201) throw new Error('create user failed ' + JSON.stringify(r.body));
       created.users.push(r.body.user.id); return { ...r.body.user, password: password || r.body.password };
     };
@@ -200,6 +200,66 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('一對一文字只有雙方能讀', dmT.status === 201 && dmSee.body.messages.some(x => x.text === '私人文字') && dmHide.status === 403);
     const empty = await http('POST', '/api/messages', { conv: CH, text: '   ' }, tok[m1.id]);
     ok('空白文字被拒絕', empty.status === 400);
+
+    // ===== 調度台 =====
+    const dispHtml = await fetch(BASE + '/dispatch');
+    ok('/dispatch 頁面可開啟', dispHtml.status === 200 && (await dispHtml.text()).includes('調度台'));
+    const dsp = await mk('dsp', '調度甲', 'Dsp-pass-123', 'dispatcher');
+    const dsp2 = await mk('dsp2', '調度乙', 'Dsp2-pass-123', 'dispatcher');
+    ok('後台可建立調度員角色', dsp.role === 'dispatcher' && dsp2.role === 'dispatcher');
+    const rolePatch = await http('PATCH', `/api/admin/users/${dsp.id}`, { role: 'dispatcher' }, adminTok);
+    ok('後台可把身分設為調度員', rolePatch.status === 200 && rolePatch.body.user.role === 'dispatcher');
+    const dspTok = await login(dsp.username, dsp.password);
+    const dsp2Tok = await login(dsp2.username, dsp2.password);
+    ok('調度員可以登入', !!dspTok && !!dsp2Tok);
+    const D1 = await client(dspTok, 'dsp1'), D2 = await client(dsp2Tok, 'dsp2');
+    ok('調度員 welcome 含佇列與調度員名單', D1.has(m => m.t === 'welcome' && Array.isArray(m.queue) && Array.isArray(m.dispatchers)));
+    C[m1.id].clear(); C[m1.id].send({ t: 'listen', channels: [CH] });
+    ok('一般使用者不能同時監聽多頻道', !!(await C[m1.id].wait(m => m.t === 'error' && m.code === 'forbidden')));
+    D1.send({ t: 'listen', channels: [CH, 'lobby'] });
+    const listening = await D1.wait(m => m.t === 'listening');
+    ok('調度員可同時監聽多個頻道', listening.channels.includes(CH) && listening.channels.includes('lobby'), JSON.stringify(listening.channels));
+    C[m1.id].clear(); D1.clear(); C[m2.id].clear();
+    const gLis = await talk(C[m1.id], CH);
+    C[m1.id].ws.send(tone(250, 660));
+    const tsLis = await D1.wait(m => m.t === 'talk_start' && m.from === m1.id && m.conv === CH);
+    await sleep(300);
+    ok('調度員監聽時可收到頻道誰在講與語音', gLis.t === 'floor_granted' && !!tsLis && D1.bin.length > 0, `frames=${D1.bin.length}`);
+    C[m1.id].send({ t: 'ptt_stop' });
+    await D1.wait(m => m.t === 'talk_end' && m.from === m1.id);
+    D1.clear(); C[m2.id].clear();
+    const gDispTalk = await talk(D1, CH);
+    D1.ws.send(tone(200, 330));
+    await C[m2.id].wait(m => m.t === 'talk_start' && m.from === dsp.id && m.conv === CH);
+    await sleep(250);
+    ok('調度員可對監聽中的頻道發話，成員聽得到', gDispTalk.t === 'floor_granted' && C[m2.id].bin.length > 0, `frames=${C[m2.id].bin.length}`);
+    D1.send({ t: 'ptt_stop' });
+    await C[m2.id].wait(m => m.t === 'talk_end' && m.from === dsp.id);
+    D1.clear(); C[m1.id].clear();
+    C[m1.id].send({ t: 'dispatch_call' });
+    const qSelf = await C[m1.id].wait(m => m.t === 'queue_self');
+    const qD = await D1.wait(m => m.t === 'queue' && (m.items || []).some(i => i.from === m1.id && i.status === 'waiting'));
+    ok('個人呼叫調度台會進入共用佇列', qSelf.item && qSelf.item.status === 'waiting' && !!qD, qSelf.item && qSelf.item.id);
+    D1.send({ t: 'dispatch_call' });
+    ok('調度員不能呼叫調度台', !!(await D1.wait(m => m.t === 'error' && m.code === 'forbidden')));
+    D1.send({ t: 'dispatch_pickup', id: qSelf.item.id });
+    const pkUser = await C[m1.id].wait(m => m.t === 'dispatch_pickup');
+    const pkD = await D1.wait(m => m.t === 'dispatch_pickup' && m.pickup);
+    ok('調度員接聽後轉成一對一', pkUser.conv && pkUser.conv.startsWith('dm:') && pkD.conv === pkUser.conv && pkUser.conv.includes(dsp.id));
+    D1.clear(); C[m1.id].clear();
+    const gCall = await talk(D1, pkD.conv);
+    D1.ws.send(tone(180, 440));
+    await C[m1.id].wait(m => m.t === 'talk_start' && m.conv === pkD.conv);
+    D1.send({ t: 'ptt_stop' });
+    ok('接聽後雙方可一對一對講', gCall.t === 'floor_granted');
+    D2.clear(); C[m1.id].clear();
+    D1.send({ t: 'dispatch_transfer', id: qSelf.item.id, to: dsp2.id });
+    const xfUser = await C[m1.id].wait(m => m.t === 'dispatch_transfer');
+    const xf2 = await D2.wait(m => m.t === 'dispatch_transfer' && m.pickup);
+    ok('可把通話轉接給其他在線調度員', xfUser.to === dsp2.id && xf2.conv && xf2.conv.includes(dsp2.id) && xf2.conv.includes(m1.id));
+    D2.send({ t: 'dispatch_done', id: qSelf.item.id });
+    ok('結束呼叫後雙方收到通知', !!(await C[m1.id].wait(m => m.t === 'dispatch_done')) && !!(await D2.wait(m => m.t === 'dispatch_done')));
+    for (const c of [D1, D2]) try { c.ws.close(); } catch {}
 
     // ===== 後台操作即時生效 =====
     await http('DELETE', `/api/admin/channels/${CH}/members/${lis.id}`, null, adminTok);

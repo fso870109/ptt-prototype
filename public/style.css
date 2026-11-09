@@ -96,3 +96,8 @@ a.link,a.link:visited{color:#38bdf8;text-decoration:none}
 .chat-form input[type=text],.chat-form #chatInput{flex:1;margin:0}
 .photo-btn{flex:none;background:#334155;border-radius:12px;padding:10px 12px;cursor:pointer;font-size:18px}
 .send-btn{flex:none;background:#0ea5e9;font-weight:600;padding:10px 14px}
+
+.call-dispatch{display:block;width:100%;margin:10px 0 0;padding:12px;border:0;border-radius:12px;background:#0ea5e9;color:#fff;font-weight:700;cursor:pointer}
+.call-dispatch:disabled{opacity:.55;cursor:default}
+.call-dispatch.hidden{display:none}
+#dispatchStatus{margin-top:6px;text-align:center}

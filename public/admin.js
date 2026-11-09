@@ -2,6 +2,7 @@
 // 管理後台：使用 /api/admin/*（需要管理員 token）
 const $ = (s) => document.querySelector(s);
 const ROLE_LABEL = { supervisor: '主管', member: '一般', listener: '只聽' };
+const USER_ROLE_LABEL = { user: '使用者', dispatcher: '調度員', admin: '管理員' };
 let token = localStorage.getItem('ptt_token') || '';
 let me = null, users = [], channels = [];
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -33,12 +34,11 @@ function renderAlerts(list) {
 function renderUsers() {
   $('#userRows').innerHTML = users.map(u => `<tr data-id="${esc(u.id)}">
     <td>${esc(u.username)}</td><td>${esc(u.displayName)}</td>
-    <td>${u.role === 'admin' ? '<span class="tag admin">管理員</span>' : '使用者'}</td>
+    <td>${u.id === me.id ? (USER_ROLE_LABEL[u.role] || u.role) : `<select data-act="setuserrole">${Object.entries(USER_ROLE_LABEL).map(([k, v]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
     <td>${u.disabled ? '<span class="tag off">已停用</span>' : u.online ? '<span class="tag on">在線</span>' : '<span class="tag">離線</span>'}</td>
     <td>${u.id === me.id ? '<span class="muted small">（你）</span> <button data-act="pw">重設密碼</button>' : `
       <button data-act="rename">改名</button>
       <button data-act="pw">重設密碼</button>
-      <button data-act="role">${u.role === 'admin' ? '改為使用者' : '設為管理員'}</button>
       <button data-act="toggle" class="${u.disabled ? '' : 'danger'}">${u.disabled ? '啟用' : '停用'}</button>
       <button data-act="del" class="danger">刪除</button>`}</td></tr>`).join('');
 }
@@ -74,6 +74,13 @@ $('#newUser').addEventListener('submit', async (e) => {
   np.textContent = j.password ? `已建立 ${j.user.username}，自動產生的密碼：${j.password}（只顯示這一次，請交給使用者）` : `已建立 ${j.user.username}`;
   refresh();
 });
+$('#userRows').addEventListener('change', async (e) => {
+  const sel = e.target.closest('select[data-act="setuserrole"]'); if (!sel) return;
+  const id = sel.closest('tr').dataset.id;
+  if (id === me.id) return;
+  await api('PATCH', `/api/admin/users/${id}`, { role: sel.value });
+  toast('已更新身分'); refresh();
+});
 $('#userRows').addEventListener('click', async (e) => {
   const b = e.target.closest('button[data-act]'); if (!b) return;
   const id = b.closest('tr').dataset.id; const u = users.find(x => x.id === id);
@@ -86,7 +93,6 @@ $('#userRows').addEventListener('click', async (e) => {
     const np = $('#newPw'); np.classList.remove('hidden'); np.textContent = j.password ? `${u.username} 的新密碼：${j.password}（只顯示這一次）` : `${u.username} 的密碼已更新`;
     if (id === me.id) { toast('你的密碼已變更，請重新登入'); setTimeout(() => location.reload(), 1500); return; }
   }
-  if (act === 'role') await api('PATCH', `/api/admin/users/${id}`, { role: u.role === 'admin' ? 'user' : 'admin' });
   if (act === 'toggle') { if (!u.disabled && !confirm(`確定停用 ${u.username}？對方會立即被登出。`)) return; await api('PATCH', `/api/admin/users/${id}`, { disabled: !u.disabled }); }
   if (act === 'del') { if (!confirm(`確定刪除 ${u.username}？此動作無法復原。`)) return; await api('DELETE', `/api/admin/users/${id}`); }
   toast('已更新'); refresh();

@@ -1,6 +1,6 @@
 // PTT 原型伺服器（第二階段）
-// - HTTP：靜態檔、登入 API、管理後台 API、位置 API
-// - WebSocket：信令、語音即時轉發（不保存錄音）、floor control（含優先搶話）、位置、緊急警報
+// - HTTP：靜態檔、登入 API、管理後台 API、文字/照片、位置 API、調度台頁面
+// - WebSocket：信令、語音即時轉發（不保存錄音）、floor control、位置、警報、聊天、調度監聽與來電佇列
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -42,7 +42,7 @@ const nameOf = (id) => { const u = userById(id); return u ? u.displayName : '?';
 function roleIn(u, ch) {
   if (!u || !ch || u.disabled) return null;
   if (ch.members[u.id]) return ch.members[u.id];
-  if (u.role === 'admin') return 'supervisor';
+  if (u.role === 'admin' || u.role === 'dispatcher') return 'supervisor';
   if (ch.open) return 'member';
   return null;
 }
@@ -51,6 +51,7 @@ function canAccess(u, conv) {
   if (isDm(conv)) return dmParts(conv).includes(u.id);
   return !!roleIn(u, chById(conv));
 }
+function isDispatcher(u) { return !!u && (u.role === 'admin' || u.role === 'dispatcher'); }
 function ensureLobby() { if (!chById('lobby')) D().channels.unshift({ id: 'lobby', name: '大廳', open: true, members: {}, createdAt: now() }); }
 async function seedAdmin() {
   const un = process.env.ADMIN_USERNAME, pw = process.env.ADMIN_PASSWORD;
@@ -95,7 +96,12 @@ const lastTalk = new Map();
 const locations = new Map();
 /** alertId -> { id, userId, name, channel, channelName, lat, lng, acc, ts, notified:Set } */
 const alerts = new Map();
+/** id -> { id, from, fromName, channel, channelName, ts, status, heldBy, heldByName } */
+const dispatchQueue = new Map();
 let streamSeq = 1;
+function queueView() { return [...dispatchQueue.values()].map(q => ({ ...q })); }
+function dispatchersOnline() { return [...online.keys()].map(userById).filter(isDispatcher).map(u => ({ id: u.id, name: u.displayName })); }
+function broadcastDispatchers(obj) { for (const d of dispatchersOnline()) sendUser(d.id, obj); }
 
 const isOnline = (id) => { const o = online.get(id); return !!(o && o.sockets.size); };
 function send(ws, obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -108,11 +114,20 @@ function membersOf(chId) {
 function onlineList() { return [...online.entries()].filter(([id, o]) => o.sockets.size && userById(id)).map(([id, o]) => ({ id, name: nameOf(id), channel: o.channel })); }
 function recipients(conv) {
   if (isDm(conv)) return dmParts(conv).filter(isOnline);
-  return [...online.entries()].filter(([, o]) => o.channel === conv).map(([id]) => id);
+  const ids = new Set();
+  for (const [id, o] of online) {
+    if (o.channel === conv) ids.add(id);
+    if (o.listen && o.listen.has(conv)) ids.add(id);
+  }
+  return [...ids];
 }
 function broadcastConv(conv, obj, except) { for (const id of recipients(conv)) if (id !== except) sendUser(id, obj); }
 function broadcastPresence(chId) { if (chId) broadcastConv(chId, { t: 'members', channel: chId, members: membersOf(chId) }); }
-function broadcastOnline() { const list = onlineList(); for (const id of online.keys()) sendUser(id, { t: 'online', online: list }); }
+function broadcastOnline() {
+  const list = onlineList();
+  for (const id of online.keys()) sendUser(id, { t: 'online', online: list });
+  broadcastDispatchers({ t: 'dispatchers', list: dispatchersOnline() });
+}
 function channelsFor(u) {
   return D().channels.filter(c => roleIn(u, c)).map(c => {
     const r = roleIn(u, c); const lt = lastTalk.get(c.id);
@@ -176,7 +191,7 @@ function endFloor(conv, reason, extra = {}) {
 // ---------- 位置可見範圍 ----------
 function canSeeLoc(viewer, targetId) {
   if (!viewer) return false;
-  if (viewer.role === 'admin' || viewer.id === targetId) return true;
+  if (viewer.role === 'admin' || viewer.role === 'dispatcher' || viewer.id === targetId) return true;
   const vc = channelOf(viewer.id); return !!vc && vc === channelOf(targetId);
 }
 function locEntry(id) {
@@ -190,7 +205,7 @@ function pushAllLocs(id) { const u = userById(id); if (u) sendUser(id, { t: 'loc
 // ---------- 緊急警報 ----------
 function alertAudience(a) {
   const ids = new Set([a.userId]);
-  for (const [id, o] of online) { const u = userById(id); if (!u) continue; if (u.role === 'admin' || (a.channel && o.channel === a.channel)) ids.add(id); }
+  for (const [id, o] of online) { const u = userById(id); if (!u) continue; if (u.role === 'admin' || u.role === 'dispatcher' || (a.channel && o.channel === a.channel)) ids.add(id); }
   return ids;
 }
 function alertView(a) { const { notified, ...rest } = a; return rest; }
@@ -237,7 +252,7 @@ async function api(req, res, p, url) {
   const method = req.method;
   if (p === '/api/health') {
     const ms = await media.stats();
-    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, activeTalks: floors.size, activeAlerts: alerts.size, storesAudio: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES });
+    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, activeTalks: floors.size, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES });
   }
   if (p === '/api/login' && method === 'POST') {
     const b = await readBody(req); if (!b) return json(res, 400, { error: 'bad_request' });
@@ -328,7 +343,8 @@ async function api(req, res, p, url) {
       let password = b.password ? String(b.password) : ''; let generated = false;
       if (!password) { password = A.genPassword(); generated = true; }
       if (password.length < 8) return json(res, 400, { error: 'weak_password', message: '密碼至少 8 個字元' });
-      const u = { id: 'u' + uid(6), username, displayName: cleanName(b.displayName) || username, role: b.role === 'admin' ? 'admin' : 'user', passHash: A.hashPassword(password), createdAt: now() };
+      const role = (b.role === 'admin' || b.role === 'dispatcher') ? b.role : 'user';
+      const u = { id: 'u' + uid(6), username, displayName: cleanName(b.displayName) || username, role, passHash: A.hashPassword(password), createdAt: now() };
       D().users.push(u); await store.save();
       return json(res, 201, { user: publicUser(u), password: generated ? password : undefined });
     }
@@ -336,7 +352,7 @@ async function api(req, res, p, url) {
     if (method === 'PATCH') {
       if (u.id === me.id && (b.disabled === true || (b.role && b.role !== 'admin'))) return json(res, 400, { error: 'self_lockout', message: '不能停用自己或移除自己的管理員權限' });
       if (b.displayName !== undefined) u.displayName = cleanName(b.displayName) || u.displayName;
-      if (b.role === 'admin' || b.role === 'user') u.role = b.role;
+      if (b.role === 'admin' || b.role === 'user' || b.role === 'dispatcher') u.role = b.role;
       let password;
       if (b.resetPassword || b.password) {
         password = b.password ? String(b.password) : A.genPassword();
@@ -405,7 +421,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { cors(res); res.writeHead(204); return res.end(); }
     if (p.startsWith('/api/')) return await api(req, res, p, url);
     if (p.startsWith('/audio/')) return json(res, 404, { error: 'not_found' }); // 不保存錄音
-    let rel = p === '/' ? 'index.html' : p === '/admin' || p === '/admin/' ? 'admin.html' : p.slice(1);
+    let rel = p === '/' ? 'index.html' : (p === '/admin' || p === '/admin/') ? 'admin.html' : (p === '/dispatch' || p === '/dispatch/') ? 'dispatch.html' : p.slice(1);
     let f = path.normalize(path.join(PUB, rel));
     if (!f.startsWith(PUB) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(PUB, 'index.html');
     res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin' });
@@ -440,9 +456,9 @@ wss.on('connection', (ws) => {
       if (!u) { send(ws, { t: 'auth_failed', reason: 'invalid_token' }); return ws.close(4001, 'auth'); }
       clearTimeout(authTimer);
       me = u; ws.userId = u.id;
-      let o = online.get(u.id); if (!o) { o = { sockets: new Set(), channel: null }; online.set(u.id, o); }
+      let o = online.get(u.id); if (!o) { o = { sockets: new Set(), channel: null, listen: new Set() }; online.set(u.id, o); }
       o.sockets.add(ws);
-      send(ws, { t: 'welcome', user: publicUser(u), channels: channelsFor(u), dms: dmSummaries(u.id), online: onlineList(), alerts: alertsVisibleTo(u), roles: CH_ROLES, serverTime: now() });
+      send(ws, { t: 'welcome', user: publicUser(u), channels: channelsFor(u), dms: dmSummaries(u.id), online: onlineList(), alerts: alertsVisibleTo(u), roles: CH_ROLES, queue: isDispatcher(u) ? queueView() : [], dispatchers: isDispatcher(u) ? dispatchersOnline() : [], serverTime: now() });
       if (o.channel) { send(ws, { t: 'joined', channel: o.channel }); broadcastPresence(o.channel); }
       broadcastOnline();
       for (const [conv, f] of floors) if (recipients(conv).includes(u.id) && f.userId !== u.id) send(ws, { t: 'talk_start', conv, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
@@ -469,14 +485,21 @@ wss.on('connection', (ws) => {
       }
       case 'ptt_start': {
         let conv = m.conv;
-        if (m.to) {
-          const peer = userById(m.to);
-          if (!peer || peer.disabled || peer.id === me.id) return send(ws, { t: 'floor_denied', conv: null, reason: 'no_access' });
-          conv = dmKey(me.id, peer.id);
+        if (m.to || isDm(conv)) {
+          if (m.to) {
+            const peer = userById(m.to);
+            if (!peer || peer.disabled || peer.id === me.id) return send(ws, { t: 'floor_denied', conv: null, reason: 'no_access' });
+            conv = dmKey(me.id, peer.id);
+          }
+          const parts = dmParts(conv);
+          if (!parts.includes(me.id)) return send(ws, { t: 'floor_denied', conv, reason: 'no_access' });
+          const peer = userById(parts.find(x => x !== me.id));
+          if (!peer || peer.disabled) return send(ws, { t: 'floor_denied', conv, reason: 'no_access' });
           if (!isOnline(peer.id)) return send(ws, { t: 'floor_denied', conv, reason: 'offline', byName: peer.displayName });
         } else {
           const ch = chById(conv); const r = roleIn(me, ch);
-          if (!ch || !r || o.channel !== conv) return send(ws, { t: 'floor_denied', conv, reason: 'no_access' });
+          const listening = !!(o.listen && o.listen.has(conv));
+          if (!ch || !r || (o.channel !== conv && !listening)) return send(ws, { t: 'floor_denied', conv, reason: 'no_access' });
           if (!CH_ROLES[r].talk && !activeAlertOf(me.id)) return send(ws, { t: 'floor_denied', conv, reason: 'listen_only' });
         }
         if (ws.talking && ws.talking !== conv) endFloor(ws.talking, 'switch');
@@ -513,8 +536,62 @@ wss.on('connection', (ws) => {
       case 'alert_resolve': {
         const a = alerts.get(m.id);
         if (!a) return send(ws, { t: 'error', code: 'no_alert', msg: '警報已結束' });
-        if (me.role !== 'admin' && a.userId !== me.id) return send(ws, { t: 'error', code: 'forbidden', msg: '只有管理員或發送者可以解除警報' });
+        if (me.role !== 'admin' && me.role !== 'dispatcher' && a.userId !== me.id) return send(ws, { t: 'error', code: 'forbidden', msg: '只有管理員、調度員或發送者可以解除警報' });
         endAlert(a, me); break;
+      }
+      case 'listen': {
+        if (!isDispatcher(me)) return send(ws, { t: 'error', code: 'forbidden', msg: '只有調度員或管理員可以同時監聽多個頻道' });
+        const ids = Array.isArray(m.channels) ? m.channels.map(String) : [];
+        o.listen = new Set(ids.filter(id => roleIn(me, chById(id))));
+        send(ws, { t: 'listening', channels: [...o.listen] });
+        for (const ch of o.listen) {
+          const f = floors.get(ch);
+          if (f && f.userId !== me.id) send(ws, { t: 'talk_start', conv: ch, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
+        }
+        break;
+      }
+      case 'dispatch_call': {
+        if (isDispatcher(me)) return send(ws, { t: 'error', code: 'forbidden', msg: '調度員請從佇列接聽來電' });
+        for (const q of dispatchQueue.values()) if (q.from === me.id && q.status === 'waiting') { send(ws, { t: 'queue_self', item: q }); return; }
+        const item = { id: 'q' + uid(6), from: me.id, fromName: me.displayName, channel: o.channel, channelName: chById(o.channel)?.name || '', ts: now(), status: 'waiting', heldBy: null, heldByName: null };
+        dispatchQueue.set(item.id, item);
+        send(ws, { t: 'queue_self', item });
+        broadcastDispatchers({ t: 'queue', items: queueView() });
+        break;
+      }
+      case 'dispatch_pickup': {
+        if (!isDispatcher(me)) return send(ws, { t: 'error', code: 'forbidden', msg: '需要調度員權限' });
+        const item = dispatchQueue.get(m.id);
+        if (!item || item.status !== 'waiting') return send(ws, { t: 'error', code: 'no_queue', msg: '此通呼叫已被接聽或不存在' });
+        item.status = 'held'; item.heldBy = me.id; item.heldByName = me.displayName;
+        const conv = dmKey(item.from, me.id);
+        sendUser(item.from, { t: 'dispatch_pickup', item, by: me.id, byName: me.displayName, conv });
+        sendUser(me.id, { t: 'dispatch_pickup', item, by: me.id, byName: me.displayName, conv, pickup: true });
+        broadcastDispatchers({ t: 'queue', items: queueView() });
+        break;
+      }
+      case 'dispatch_transfer': {
+        if (!isDispatcher(me)) return send(ws, { t: 'error', code: 'forbidden', msg: '需要調度員權限' });
+        const item = dispatchQueue.get(m.id);
+        const peer = userById(m.to);
+        if (!item || item.heldBy !== me.id) return send(ws, { t: 'error', code: 'no_queue', msg: '你沒有這通通話可以轉接' });
+        if (!peer || !isDispatcher(peer) || !isOnline(peer.id) || peer.id === me.id) return send(ws, { t: 'error', code: 'no_peer', msg: '對方不是在線的調度員' });
+        item.heldBy = peer.id; item.heldByName = peer.displayName;
+        const conv = dmKey(item.from, peer.id);
+        sendUser(item.from, { t: 'dispatch_transfer', item, by: me.displayName, to: peer.id, toName: peer.displayName, conv });
+        sendUser(peer.id, { t: 'dispatch_transfer', item, from: me.id, fromName: me.displayName, conv, pickup: true });
+        broadcastDispatchers({ t: 'queue', items: queueView() });
+        break;
+      }
+      case 'dispatch_done': {
+        const item = dispatchQueue.get(m.id);
+        if (!item) return;
+        if (me.id !== item.from && item.heldBy !== me.id && me.role !== 'admin') return send(ws, { t: 'error', code: 'forbidden', msg: '不能結束這通呼叫' });
+        dispatchQueue.delete(item.id);
+        sendUser(item.from, { t: 'dispatch_done', id: item.id });
+        if (item.heldBy) sendUser(item.heldBy, { t: 'dispatch_done', id: item.id });
+        broadcastDispatchers({ t: 'queue', items: queueView() });
+        break;
       }
       case 'chat': {
         const conv = String(m.conv || '');
@@ -538,7 +615,10 @@ wss.on('connection', (ws) => {
     if (!me) return;
     const o = online.get(me.id); if (!o) return;
     o.sockets.delete(ws);
-    if (!o.sockets.size) { broadcastPresence(o.channel); broadcastOnline(); pushChannelsAll(); if (locations.has(me.id)) pushLocTo(me.id); }
+    if (!o.sockets.size) {
+      broadcastPresence(o.channel); broadcastOnline(); pushChannelsAll(); if (locations.has(me.id)) pushLocTo(me.id);
+      for (const [id, q] of [...dispatchQueue]) if (q.from === me.id && q.status === 'waiting') { dispatchQueue.delete(id); broadcastDispatchers({ t: 'queue', items: queueView() }); }
+    }
   });
 });
 

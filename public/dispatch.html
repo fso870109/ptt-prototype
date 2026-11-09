@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>調度台 · 一鍵對講</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/dispatch.css">
+</head>
+<body class="dispatch-body">
+<section id="loginBox" class="screen">
+  <form class="login-card" id="loginForm">
+    <h1>調度台</h1>
+    <p class="sub">管理員或調度員登入</p>
+    <input id="username" placeholder="帳號" autocomplete="username" autocapitalize="none">
+    <input id="password" type="password" placeholder="密碼" autocomplete="current-password">
+    <button class="primary" type="submit">登入</button>
+    <p id="loginErr" class="err"></p>
+    <p class="hint"><a class="link" href="/">回對講</a></p>
+  </form>
+</section>
+<section id="denied" class="screen hidden"><div class="login-card"><h2>需要調度員權限</h2><p>請用管理員或調度員帳號登入。</p><p><a class="link" href="/">回對講</a></p></div></section>
+
+<div id="desk" class="desk hidden">
+  <header class="topbar">
+    <strong>🖥️ 調度台</strong>
+    <div class="conn"><span id="connDot" class="dot off"></span><span id="connText">未連線</span></div>
+    <div class="me"><span id="who"></span> <a class="link" href="/">對講</a> <a class="link" href="/admin" id="adminLink">後台</a> <button id="logout" class="link">登出</button></div>
+  </header>
+  <div id="alertBanner" class="alert-banner hidden"></div>
+  <div class="desk-grid">
+    <aside class="col ch-col">
+      <h2>監聽頻道</h2>
+      <p class="muted small">勾選即可同時收聽；每個頻道可靜音或調音量。</p>
+      <ul id="chList" class="ch-list"></ul>
+    </aside>
+    <main class="col talk-col">
+      <div id="targetLabel" class="target-label">請選一個頻道或從來電佇列接聽</div>
+      <div id="talkStatus" class="talk-status">&nbsp;</div>
+      <button id="ptt" class="ptt" disabled><span class="ptt-icon">🎙️</span><span id="pttText">按住講話</span></button>
+      <p class="muted small">電腦上可按住空白鍵講話</p>
+      <div id="meter" class="meter"><div id="meterBar"></div></div>
+    </main>
+    <aside class="col queue-col">
+      <h2>來電佇列</h2>
+      <ul id="queueList" class="list"></ul>
+      <h2>其他調度員</h2>
+      <ul id="dispList" class="list"></ul>
+      <div id="heldBox" class="held hidden">
+        <p>進行中：<b id="heldWho"></b></p>
+        <label>轉接給 <select id="xferTo"></select></label>
+        <button id="xferBtn">轉接</button>
+        <button id="doneBtn" class="danger">結束這通</button>
+      </div>
+    </aside>
+  </div>
+  <div class="desk-bottom">
+    <div class="map-wrap">
+      <h2>地圖</h2>
+      <div id="map"></div>
+      <ul id="locList" class="list loc-list"></ul>
+    </div>
+    <div class="alert-wrap">
+      <h2>緊急警報</h2>
+      <ul id="alertList" class="list"></ul>
+    </div>
+  </div>
+</div>
+<div id="alertOverlay" class="alert-overlay hidden">
+  <div class="alert-box">
+    <div class="alert-icon">🚨</div>
+    <h2>緊急警報</h2>
+    <p id="alertWho" class="alert-who"></p>
+    <p id="alertWhere" class="alert-where"></p>
+    <p id="alertWhen" class="muted"></p>
+    <div class="alert-actions">
+      <a id="alertMapLink" class="alert-btn" target="_blank" rel="noopener">在地圖上查看</a>
+      <button id="alertAck" class="alert-btn">知道了</button>
+      <button id="alertResolve" class="alert-btn danger">解除警報</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/dispatch.js"></script>
+</body>
+</html>

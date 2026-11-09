@@ -32,7 +32,7 @@
 <section id="main" class="screen hidden">
   <header class="topbar">
     <div class="conn"><span id="connDot" class="dot off"></span><span id="connText">未連線</span></div>
-    <div class="me"><span id="meName"></span> <a id="adminLink" class="link hidden" href="/admin">後台</a> <button id="logout" class="link">登出</button></div>
+    <div class="me"><span id="meName"></span> <a id="dispatchLink" class="link hidden" href="/dispatch">調度台</a> <a id="adminLink" class="link hidden" href="/admin">後台</a> <button id="logout" class="link">登出</button></div>
   </header>
 
   <div id="alertBanner" class="alert-banner hidden"></div>
@@ -79,6 +79,8 @@
     </button>
     <div id="meter" class="meter"><div id="meterBar"></div></div>
     <button id="sos" class="sos" type="button"><span class="sos-fill"></span><span class="sos-text">🚨 長按 2 秒發出緊急警報</span></button>
+    <button id="callDispatch" class="call-dispatch" type="button">呼叫調度台</button>
+    <p id="dispatchStatus" class="muted small hidden"></p>
   </div>
 
   <div class="history">

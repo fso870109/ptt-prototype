@@ -36,8 +36,9 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 
 | 值 | 說明 |
 |---|---|
-| `admin` | 管理員。可使用 `/admin` 與所有 `/api/admin/*`。在未個別指派的頻道預設為「主管」。 |
-| `user` | 一般使用者。 |
+| `admin` | 管理員。可使用 `/admin`、`/dispatch` 與所有 `/api/admin/*`。在未個別指派的頻道預設為「主管」。可見全體位置與警報。 |
+| `dispatcher` | 調度員。可使用 `/dispatch` 同時監聽多頻道、處理來電佇列。不可使用 `/api/admin/*`。在未個別指派的頻道預設為「主管」。可見全體位置與警報，可解除警報。 |
+| `user` | 一般使用者。可按「呼叫調度台」進入共用佇列。 |
 
 **頻道角色**（每個頻道、每位成員一份）
 
@@ -69,12 +70,19 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
   "users": 1,
   "activeTalks": 0,
   "activeAlerts": 0,
-  "storesAudio": false
+  "storesAudio": false,
+  "messages": 0,
+  "photos": 0,
+  "photoBytes": 0,
+  "photoRetentionDays": 7,
+  "photoQuotaBytes": 314572800,
+  "dispatchQueue": 0
 }
 ```
 
 - `storage`：`postgres` 或 `json`（本機無 `DATABASE_URL` 時）
 - `storesAudio` 永遠為 `false`
+- `dispatchQueue`：記憶體中尚未結束的調度台呼叫數（含等候中與進行中）
 
 ### 2.2 `POST /api/login`
 ```json
@@ -129,10 +137,10 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 
 - `battery`：0–100 的整數；未知為 `null`（iOS Safari 不支援 Battery Status API）
 - `acc`：定位誤差公尺，可能為 `null`
-- 可見範圍：自己；管理員看全體；一般成員只看**目前與自己在同一頻道**的人
+- 可見範圍：自己；管理員與調度員看全體；一般成員只看**目前與自己在同一頻道**的人
 
 ### 2.7 `GET /api/alerts`
-進行中、呼叫者可見的警報（管理員看全部；一般成員看自己發的＋目前同頻道的）。格式見 WebSocket `alert`。
+進行中、呼叫者可見的警報（管理員與調度員看全部；一般成員看自己發的＋目前同頻道的）。格式見 WebSocket `alert`。
 
 ### 2.8 管理後台（需 `user.role === "admin"`，否則 `403 forbidden`）
 
@@ -190,6 +198,7 @@ wss://<host>/ws
 每個連線（準確地說：這個使用者的線上狀態）同時只「在」一個頻道。私人對講不需 join。
 
 #### `ptt_start` — 請求發言權
+發話對象必須是你目前 `join` 的頻道、一對一對象，或（僅調度員／管理員）已用 `listen` 勾選的頻道。
 對頻道：
 ```json
 { "t": "ptt_start", "conv": "lobby" }
@@ -252,7 +261,38 @@ wss://<host>/ws
 ```json
 { "t": "alert_resolve", "id": "a…" }
 ```
-僅管理員或該則警報的發送者可以解除。
+僅管理員、調度員或該則警報的發送者可以解除。
+
+#### `listen` — 同時監聽多個頻道（僅管理員／調度員）
+```json
+{ "t": "listen", "channels": ["lobby", "c…"] }
+```
+伺服器只保留呼叫者有權限的頻道 id，並回 `{ "t": "listening", "channels": ["lobby", "c…"] }`。  
+監聽中的頻道會把你列入語音接收名單（即使你目前 `join` 在別的頻道或尚未 join）。每條頻道仍受既有 floor control 約束。一般使用者送出此訊息會收到 `{ "t": "error", "code": "forbidden" }`。
+
+#### `dispatch_call` — 一般使用者呼叫調度台
+```json
+{ "t": "dispatch_call" }
+```
+同一人若已有一通 `waiting` 呼叫，伺服器回傳既有項目而不新增。調度員／管理員送出會被拒絕（`forbidden`）。呼叫者會收到 `queue_self`；所有在線調度員會收到更新後的 `queue`。
+
+#### `dispatch_pickup` — 調度員接聽
+```json
+{ "t": "dispatch_pickup", "id": "q…" }
+```
+成功後該則改為 `held`，並建立呼叫者與該調度員的一對一對話（`dm:<sortedUserIds>`）。呼叫者與接聽者都會收到 `dispatch_pickup`（接聽者帶 `pickup: true` 與 `conv`）。
+
+#### `dispatch_transfer` — 把進行中的通話轉給其他在線調度員
+```json
+{ "t": "dispatch_transfer", "id": "q…", "to": "u…" }
+```
+只有目前 `heldBy` 的調度員能轉接；`to` 必須是其他在線的管理員或調度員。呼叫者與新調度員會收到 `dispatch_transfer`（新調度員帶 `pickup: true` 與新的 `conv`）。
+
+#### `dispatch_done` — 結束這通呼叫
+```json
+{ "t": "dispatch_done", "id": "q…" }
+```
+呼叫者、目前接聽者或管理員可以結束。佇列項目從記憶體刪除，相關人士收到 `dispatch_done`。
 
 #### `ping`
 ```json
@@ -286,6 +326,8 @@ wss://<host>/ws
   ],
   "online": [{ "id": "u…", "name": "小明", "channel": "lobby" }],
   "alerts": [ /* 見 alert */ ],
+  "queue": [ /* 僅調度員／管理員：見 queue；其他人為 [] */ ],
+  "dispatchers": [ /* 僅調度員／管理員：目前在線的 {id,name}；其他人為 [] */ ],
   "roles": {
     "supervisor": { "label": "主管", "prio": 3, "talk": true },
     "member": { "label": "一般", "prio": 2, "talk": true },
@@ -401,12 +443,49 @@ wss://<host>/ws
 ```json
 { "t": "error", "code": "no_access", "msg": "你沒有這個頻道的權限" }
 ```
-常見 `code`：`no_access` | `no_alert` | `forbidden`
+常見 `code`：`no_access` | `no_alert` | `forbidden` | `no_queue` | `no_peer` | `empty` | `too_long`
 
 #### `pong`
 ```json
 { "t": "pong", "ts": 1731200000000 }
 ```
+
+#### `listening`
+```json
+{ "t": "listening", "channels": ["lobby", "c…"] }
+```
+
+#### `queue` / `queue_self`
+```json
+{
+  "t": "queue",
+  "items": [
+    {
+      "id": "q…",
+      "from": "u…",
+      "fromName": "小明",
+      "channel": "lobby",
+      "channelName": "大廳",
+      "ts": 1731200000000,
+      "status": "waiting",
+      "heldBy": null,
+      "heldByName": null
+    }
+  ]
+}
+```
+`status`：`waiting`（排隊中）| `held`（已被某調度員接聽，此時 `heldBy` / `heldByName` 有值）。佇列只存在記憶體，伺服器重啟即清空。呼叫者自己會另外收到：
+```json
+{ "t": "queue_self", "item": { /* 同上單筆 */ } }
+```
+
+#### `dispatch_pickup` / `dispatch_transfer` / `dispatch_done`
+```json
+{ "t": "dispatch_pickup", "item": { /* 佇列項目，status=held */ }, "by": "u…", "byName": "調度甲", "conv": "dm:uAaa:uBbb", "pickup": true }
+{ "t": "dispatch_transfer", "item": { }, "by": "調度甲", "to": "u…", "toName": "調度乙", "conv": "dm:uAaa:uCcc", "pickup": true }
+{ "t": "dispatch_done", "id": "q…" }
+```
+`pickup: true` 只出現在「現在應該接下這通一對一」的調度員端。`dispatch_transfer` 送到原呼叫者時沒有 `pickup`，而是帶 `to` / `toName` 與新的 `conv`。
 
 ---
 
@@ -485,7 +564,7 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 ## 7. 緊急警報
 
 - 只存在記憶體，不保存錄音。
-- 廣播對象：發送者、所有**在線管理員**、與發送者**當時所在頻道**的在線成員。
+- 廣播對象：發送者、所有**在線管理員與調度員**、與發送者**當時所在頻道**的在線成員。
 - 其他頻道的一般成員收不到。
 - 警報期間發送者取得最高發話權（即使頻道角色是「只聽」）。
 - 解除後發話權恢復原本角色規則。
@@ -552,6 +631,16 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 - 刪除頻道時一併刪該頻道的文字／照片；刪除使用者時刪其私訊對話
 - 免費 Postgres 總容量 1 GB，請把照片配額與狀態 JSON 一併計算
 
+### 8.7 網頁調度台 `/dispatch`
+
+`GET /dispatch` 回傳桌面版 HTML（管理員或調度員登入後使用；一般使用者會看到權限不足提示）。原生 App 不必載入此頁，只要實作上面的 `listen` / `dispatch_*` 訊息即可做同等功能：
+
+- 同時訂閱多個 `channels` 並依頻道靜音／調音量（音量由客戶端處理，伺服器仍轉發全部封包）
+- 用 `talk_start` / `talk_end` 的 `fromName` 顯示誰在講
+- 選一個頻道或一對一 `conv` 後送 `ptt_start`（空白鍵或大按鈕按住講話）
+- 顯示共用 `queue`，`dispatch_pickup` 後用回傳的 `conv` 做一對一
+- 嵌入與一般客戶端相同的地圖（`loc` / `locs`）與警報面板（`alert` / `alert_end`）
+
 ---
 
 ## 9. 多租戶（公司隔離）
@@ -586,6 +675,8 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 6. 一對一：`ptt_start` + `to`
 7. （使用者同意後）週期性 `loc`；地圖用 OSM 並標示來源
 8. 長按防誤觸後 `alert_start`；全螢幕顯示 `alert`
-9. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
+9. 文字／照片：`GET/POST /api/messages`、`POST /api/photos`、`GET /api/photos/:id`（帶 Bearer，不要把 token 放進 URL）
+10. 若要做調度功能：`listen`、顯示 `queue`、`dispatch_call` / `dispatch_pickup` / `dispatch_transfer` / `dispatch_done`
+11. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
 
 背景限制與音訊解鎖細節見專案根目錄 `README.md`。
