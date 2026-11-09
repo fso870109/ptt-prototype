@@ -27,8 +27,10 @@ async function boot() {
   await refresh();
 }
 async function refresh() {
-  const [u, c, a] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/channels'), api('GET', '/api/admin/alerts')]);
+  const [u, c, a, s] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/channels'), api('GET', '/api/admin/alerts'), api('GET', '/api/admin/settings').catch(() => ({ settings: { saveCaptions: false } }))]);
   users = u.users; channels = c.channels; renderUsers(); renderChannels(); renderAlerts(a.alerts);
+  const box = $('#saveCaptions');
+  if (box) box.checked = !!(s.settings && s.settings.saveCaptions);
 }
 function renderAlerts(list) {
   $('#alertList').innerHTML = list.map(a => `<li><span>🚨 <b>${esc(a.name)}</b> ${a.channelName ? '#' + esc(a.channelName) : ''} · ${new Date(a.ts).toLocaleTimeString('zh-TW', { hour12: false })} ${a.lat != null ? `· <a href="https://www.openstreetmap.org/?mlat=${a.lat}&mlon=${a.lng}#map=17/${a.lat}/${a.lng}" target="_blank" rel="noopener">地圖</a>` : '· 位置不明'}</span><button class="danger" data-resolve="${esc(a.id)}">解除警報</button></li>`).join('') || '<li class="muted">目前沒有警報</li>';
@@ -69,6 +71,12 @@ $('#loginForm').addEventListener('submit', async (e) => {
   if (!r.ok) { $('#loginErr').textContent = j.message || '登入失敗'; return; }
   token = j.token; localStorage.setItem('ptt_token', token); $('#password').value = ''; if ($('#org') && localStorage.getItem('ptt_org')) $('#org').value = localStorage.getItem('ptt_org');
 boot();
+});
+if ($('#saveCaptions')) $('#saveCaptions').addEventListener('change', async () => {
+  try {
+    const j = await api('PATCH', '/api/admin/settings', { saveCaptions: $('#saveCaptions').checked });
+    toast(j.settings && j.settings.saveCaptions ? '已開啟：最終字幕會存成文字' : '已關閉：字幕只即時顯示、不存檔');
+  } catch {}
 });
 $('#logout').addEventListener('click', async () => { try { await api('POST', '/api/logout'); } catch {} localStorage.removeItem('ptt_token'); token = ''; location.reload(); });
 $('#newUser').addEventListener('submit', async (e) => {

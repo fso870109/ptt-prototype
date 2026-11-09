@@ -41,8 +41,10 @@
     <main class="col talk-col">
       <div id="targetLabel" class="target-label">請選一個頻道或從來電佇列接聽</div>
       <div id="talkStatus" class="talk-status">&nbsp;</div>
+      <div class="caption-slot"><p id="captionLive" class="caption-live hidden" aria-live="polite"></p></div>
       <button id="ptt" class="ptt" disabled><span class="ptt-icon">🎙️</span><span id="pttText">按住講話</span></button>
       <p class="muted small">電腦上可按住空白鍵講話</p>
+      <p id="sttHint" class="muted small stt-hint"></p>
       <div id="meter" class="meter"><div id="meterBar"></div></div>
     </main>
     <aside class="col queue-col">

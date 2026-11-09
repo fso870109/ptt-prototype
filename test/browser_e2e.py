@@ -42,6 +42,8 @@ try:
         pg.fill('#org', 'DEMO'); pg.fill('#username', users[name]['username']); pg.fill('#password', users[name]['password']); pg.click('#enter')
         pg.wait_for_selector('#connText:has-text("已連線")', timeout=15000)
     ok('兩個帳號用帳密登入成功', True)
+    hint = A.inner_text('#sttHint')
+    ok('對講畫面說明即時字幕（支援或不支援都會顯示說明）', '字幕' in hint or '語音轉文字' in hint, hint)
     time.sleep(1)
     A.click('[data-tab="members"]'); names = A.inner_text('#memberList')
     ok('自動加入「大廳」且看到彼此與角色', '小明' in names and '小華' in names and '一般' in names, names.replace('\n', ' '))
@@ -70,6 +72,7 @@ try:
     api('PUT', f"/api/admin/channels/lobby/members/{users['小明']['id']}", {'role': 'supervisor'}, ADM)
     A.wait_for_function("document.querySelector('#roleBadge').textContent.includes('主管')", timeout=8000)
     B.wait_for_function("document.querySelector('#pttText').textContent.includes('按住講話')", timeout=8000)
+    ax, ay = center(A, '#ptt'); bx, by = center(B, '#ptt')
     B.mouse.move(bx, by); B.mouse.down(); B.wait_for_selector('#ptt.talking', timeout=6000); time.sleep(0.6)
     A.mouse.move(ax, ay); A.mouse.down(); A.wait_for_selector('#ptt.talking', timeout=6000)
     B.wait_for_function("document.querySelector('#toast').textContent.includes('中斷')", timeout=6000)
@@ -112,6 +115,8 @@ try:
     ap.wait_for_selector(f'#userRows tr:has-text("t_ui_{sfx}")', timeout=8000)
     npw = ap.inner_text('#newPw')
     ok('後台介面建立使用者並顯示一次性密碼', '自動產生的密碼' in npw)
+    ap.wait_for_selector('#saveCaptions', timeout=8000)
+    ok('後台有儲存字幕開關且預設關閉', ap.is_visible('#saveCaptions') and not ap.is_checked('#saveCaptions'))
     _, ul = api('GET', '/api/admin/users', None, ADM)
     for u in ul['users']:
         if u['username'] == f't_ui_{sfx}': users['ui'] = {'id': u['id']}
@@ -128,6 +133,7 @@ try:
     ok('個人呼叫出現在調度台來電佇列', '小明' in dp.inner_text('#queueList'))
     dp.click('#queueList button[data-pick]')
     A.wait_for_function("document.querySelector('#dispatchStatus').textContent.includes('已接聽')", timeout=10000)
+    dp.wait_for_function("document.querySelector('#targetLabel') && document.querySelector('#targetLabel').innerText.includes('一對一')", timeout=8000)
     ok('接聽後呼叫者看到一對一提示', '已接聽' in A.inner_text('#dispatchStatus') and '一對一' in dp.inner_text('#targetLabel'))
     dp.click('#doneBtn')
     A.wait_for_function("document.querySelector('#dispatchStatus').classList.contains('hidden') || document.querySelector('#dispatchStatus').textContent === ''", timeout=8000)

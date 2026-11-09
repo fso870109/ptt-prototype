@@ -22,6 +22,76 @@ const S = {
   alerts: new Map(), ackedAlerts: new Set(), locs: new Map(),
   chat: [], chatConv: '',
 };
+function speechEngine() { return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+function updateSttHint() {
+  const el = $('#sttHint'); if (!el) return;
+  const extra = (S.org && S.org.settings && S.org.settings.saveCaptions)
+    ? '此公司有開啟「把最終字幕存成文字紀錄」。'
+    : '預設只即時顯示字幕、不存檔；公司管理員可在後台開啟存檔。';
+  if (!speechEngine()) el.textContent = '這個瀏覽器不支援即時語音轉文字（建議使用 Chrome 或 Edge；部分 iOS Safari 與 Firefox 無法使用）。對講功能不受影響，只是沒有即時字幕。' + extra;
+  else el.textContent = '講話時會嘗試產生即時字幕（繁體中文）。本伺服器不保存語音。部分瀏覽器（例如 Chrome）可能會把聲音送到廠商的辨識服務。' + extra;
+}
+function showCaptionLive(m) {
+  const el = $('#captionLive'); if (!el) return;
+  if (!m || !m.text) { el.classList.add('hidden'); el.textContent = ''; return; }
+  const mine = m.from === S.myId;
+  el.classList.remove('hidden');
+  el.textContent = (m.interim ? '字幕（辨識中）：' : '字幕：') + (mine ? '' : ((m.fromName || '') + '：')) + m.text;
+  clearTimeout(showCaptionLive.t);
+  if (!m.interim) showCaptionLive.t = setTimeout(() => { el.classList.add('hidden'); }, 6000);
+}
+function stopCaptions() {
+  S.wantCaptions = false;
+  const rec = S.captionRec;
+  if (!rec) return;
+  rec.onend = () => { if (S.captionRec === rec) S.captionRec = null; };
+  try { rec.stop(); } catch { S.captionRec = null; }
+}
+function startCaptions(conv) {
+  stopCaptions();
+  const Ctor = speechEngine();
+  if (!Ctor || !conv) return;
+  S.wantCaptions = true;
+  S.captionConv = conv;
+  const rec = new Ctor();
+  rec.lang = 'zh-TW';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = (ev) => {
+    let interim = '', finalTxt = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const piece = ev.results[i][0].transcript;
+      if (ev.results[i].isFinal) finalTxt += piece;
+      else interim += piece;
+    }
+    if (interim) {
+      showCaptionLive({ text: interim, interim: true, from: S.myId });
+      if (Date.now() - (S.lastCaptionSent || 0) > 250) {
+        S.lastCaptionSent = Date.now();
+        wsSend({ t: 'caption', conv, text: interim, interim: true });
+      }
+    }
+    if (finalTxt.trim()) {
+      const text = finalTxt.trim();
+      showCaptionLive({ text, interim: false, from: S.myId });
+      wsSend({ t: 'caption', conv, text, interim: false });
+    }
+  };
+  rec.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      const el = $('#sttHint');
+      if (el) el.textContent = '瀏覽器沒有允許語音辨識，因此沒有即時字幕。對講功能不受影響。';
+    }
+  };
+  rec.onend = () => {
+    if (S.wantCaptions && S.captionRec === rec) {
+      try { rec.start(); } catch {}
+    } else if (S.captionRec === rec) S.captionRec = null;
+  };
+  S.captionRec = rec;
+  try { rec.start(); } catch { S.captionRec = null; S.wantCaptions = false; }
+}
+
 // ---------- 音訊：AudioContext 解鎖（iOS Safari 必須在使用者手勢中 resume）----------
 let actx = null;
 function audioCtx() {
@@ -133,6 +203,7 @@ function pttUp(e) {
   S.pressing = false;
   wsSend({ t: 'ptt_stop' });
   S.granted = false; S.pending = [];
+  stopCaptions();
   btn.classList.remove('pressing', 'talking'); $('#meterBar').style.width = '0';
   releaseMicLater(); updateTalkStatus();
 }
@@ -312,7 +383,8 @@ function handle(m) {
     case 'auth_failed':
       S.authFailed = true; store.token = ''; showLogin(m.reason === 'revoked' ? '你的帳號已被停用或密碼已重設，請重新登入' : '登入已過期，請重新登入'); break;
     case 'welcome':
-      S.me = m.user; S.myId = m.user.id; S.channels = m.channels; S.dms = m.dms || []; S.online = m.online || [];
+      S.me = m.user; S.myId = m.user.id; S.channels = m.channels; S.dms = m.dms || []; S.online = m.online || []; S.org = m.org || null;
+      updateSttHint();
       const roleLabel = { admin: '平台管理員', org_admin: '公司管理員', dispatcher: '調度員' }[m.user.role];
       $('#meName').textContent = m.user.displayName + (roleLabel ? '（' + roleLabel + '）' : '');
       $('#adminLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'org_admin');
@@ -347,6 +419,7 @@ function handle(m) {
       btn.classList.remove('pressing'); btn.classList.add('talking'); $('#pttText').textContent = '說話中… 放開結束';
       for (const p of S.pending) S.ws.send(p.buffer); S.pending = [];
       if (navigator.vibrate) navigator.vibrate(40);
+      try { startCaptions(m.conv); } catch (err) { console.warn("captions", err); }
       break;
     case 'floor_denied': {
       const was = S.pressing; S.pressing = false; S.granted = false; S.pending = []; btn.classList.remove('pressing', 'talking'); releaseMicLater();
@@ -385,6 +458,9 @@ function handle(m) {
     case 'loc_remove': S.locs.delete(m.id); renderLocs(); break;
     case 'alert': S.alerts.set(m.alert.id, m.alert); S.ackedAlerts.delete(m.alert.id); renderAlerts(); break;
     case 'alert_end': S.alerts.delete(m.id); renderAlerts(); toast(`✅ 警報已由 ${m.by} 解除`); break;
+    case 'caption':
+      if (m.conv === currentConv() || S.activeTalks.has(m.conv)) showCaptionLive(m);
+      break;
     case 'chat':
       if (m.message && m.message.conv === currentConv()) {
         if (!S.chat.some(x => x.id === m.message.id)) { S.chat.push(m.message); renderChat(); }
@@ -524,6 +600,7 @@ function renderChat() {
     const mine = m.from === S.myId;
     const who = `<div class="meta">${esc(mine ? '我' : m.fromName)} · ${fmtTime(m.ts)}</div>`;
     if (m.kind === 'photo') return `<li class="${mine ? 'mine' : ''}" data-mid="${esc(m.id)}">${who}<img data-photo="${esc(m.photoId)}" alt="照片"></li>`;
+    if (m.kind === 'caption') return `<li class="${mine ? 'mine' : ''} caption" data-mid="${esc(m.id)}">${who}<div class="body"><span class="badge">字幕</span>${esc(m.text)}</div></li>`;
     return `<li class="${mine ? 'mine' : ''}" data-mid="${esc(m.id)}">${who}<div class="body">${esc(m.text)}</div></li>`;
   }).join('') || '<li class="muted">還沒有文字或照片。語音不會出現在這裡。</li>';
   el.querySelectorAll('img[data-photo]').forEach(img => {
@@ -610,6 +687,7 @@ $('#loginForm').addEventListener('submit', async (e) => {
   finally { $('#enter').disabled = false; }
 });
 if (store.org && $('#org')) $('#org').value = store.org;
+updateSttHint();
 if (store.token) {
   showMain();
   toast('點一下畫面任一處以啟用聲音');

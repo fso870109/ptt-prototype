@@ -57,6 +57,11 @@
       </form>
       <div id="channelCards"></div>
     </section>
+    <section class="card">
+      <h2>即時語音轉文字</h2>
+      <label class="chk"><input type="checkbox" id="saveCaptions"> 把最終字幕存成文字紀錄（只存文字，絕不存語音）</label>
+      <p class="muted small">講話時的即時字幕由講話者的瀏覽器用 Web Speech API（繁體中文）產生，再以文字廣播給同頻道的人。伺服器不保存、也不轉送語音去做辨識。部分 iOS Safari 與 Firefox 不支援，那些裝置仍可對講，只是沒有字幕。Chrome／Edge 可能會把聲音送到瀏覽器廠商的辨識服務，這不是我們自己的伺服器。</p>
+    </section>
     <p class="muted small">頻道角色：主管＝可講、優先權高（可中斷一般成員）；一般＝可講；只聽＝只能收聽。管理員與調度員在未指派的頻道預設為主管，並可開啟「調度台」同時監聽多個頻道、處理來電佇列。發出緊急警報的人在警報期間擁有最高發話權。</p>
   </div>
 </div>

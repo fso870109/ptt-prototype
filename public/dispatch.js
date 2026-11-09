@@ -57,6 +57,7 @@
     $('denied').classList.add('hidden');
     $('desk').classList.remove('hidden');
     $('who').textContent = user.displayName + ' · ' + user.role;
+    updateSttHint();
     if (user.role !== 'admin' && user.role !== 'org_admin') $('adminLink').classList.add('hidden');
     if (!map) {
       map = L.map('map').setView([23.97, 120.98], 7);
@@ -91,7 +92,7 @@
         case 'listening': listen = new Set(m.channels || []); renderCh(); break;
         case 'talk_start': onTalkStart(m); break;
         case 'talk_end': onTalkEnd(m); break;
-        case 'floor_granted': streamId = m.streamId; $('talkStatus').textContent = '你正在講'; $('ptt').classList.add('live'); break;
+        case 'floor_granted': streamId = m.streamId; $('talkStatus').textContent = '你正在講'; $('ptt').classList.add('live'); try { startCaptions(m.conv); } catch (err) { console.warn('captions', err); } break;
         case 'floor_denied': toast('無法取得發言權：' + (m.reason || '')); stopTalk(true); break;
         case 'floor_revoked': toast(m.reason === 'preempted' ? ((m.byName || '') + ' 插話了') : '發話已結束'); stopTalk(true); break;
         case 'queue': queue = m.items || []; renderQueue(); break;
@@ -100,6 +101,7 @@
           if (m.pickup) { held = m.item; selected = { type: 'user', id: m.item.from }; }
           renderHeld(); renderQueue(); updateTarget(); break;
         case 'dispatch_done': held = null; selected = null; renderHeld(); renderQueue(); updateTarget(); break;
+        case 'caption': showCaptionLive(m); break;
         case 'error': toast(m.msg || m.code); break;
         case 'loc': upsertLoc(m.loc); break;
         case 'locs': (m.locs || []).forEach(upsertLoc); break;
@@ -176,6 +178,49 @@
   function currentConv() {
     if (!selected) return null;
     return selected.type === 'ch' ? selected.id : dmKey(me.id, selected.id);
+  }
+  function speechEngine() { return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+  function updateSttHint() {
+    const el = $('sttHint'); if (!el) return;
+    el.textContent = speechEngine()
+      ? '講話時會嘗試產生即時字幕（繁體中文）。本伺服器不保存語音。'
+      : '這個瀏覽器不支援即時語音轉文字（建議 Chrome 或 Edge）。調度對講仍可使用。';
+  }
+  function showCaptionLive(m) {
+    const el = $('captionLive'); if (!el) return;
+    if (!m || !m.text) { el.classList.add('hidden'); el.textContent = ''; return; }
+    el.classList.remove('hidden');
+    el.textContent = (m.interim ? '字幕（辨識中）：' : '字幕：') + (m.fromName ? m.fromName + '：' : '') + m.text;
+    clearTimeout(showCaptionLive.t);
+    if (!m.interim) showCaptionLive.t = setTimeout(() => el.classList.add('hidden'), 6000);
+  }
+  let captionRec = null, wantCaptions = false;
+  function stopCaptions() {
+    wantCaptions = false;
+    const rec = captionRec;
+    if (!rec) return;
+    rec.onend = () => { if (captionRec === rec) captionRec = null; };
+    try { rec.stop(); } catch { captionRec = null; }
+  }
+  function startCaptions(conv) {
+    stopCaptions();
+    const Ctor = speechEngine();
+    if (!Ctor || !conv) return;
+    wantCaptions = true;
+    const rec = new Ctor();
+    rec.lang = 'zh-TW'; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = (ev) => {
+      let interim = '', finalTxt = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const piece = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) finalTxt += piece; else interim += piece;
+      }
+      if (interim) { showCaptionLive({ text: interim, interim: true, fromName: '我' }); send({ t: 'caption', conv, text: interim, interim: true }); }
+      if (finalTxt.trim()) { showCaptionLive({ text: finalTxt.trim(), interim: false, fromName: '我' }); send({ t: 'caption', conv, text: finalTxt.trim(), interim: false }); }
+    };
+    rec.onend = () => { if (wantCaptions && captionRec === rec) { try { rec.start(); } catch {} } else if (captionRec === rec) captionRec = null; };
+    captionRec = rec;
+    try { rec.start(); } catch { captionRec = null; wantCaptions = false; }
   }
 
   function onTalkStart(m) {
@@ -260,6 +305,7 @@
     try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
     processor = null; stream = null;
     if (!silent) send({ t: 'ptt_stop' });
+    stopCaptions();
     $('ptt').classList.remove('live');
     $('pttText').textContent = '按住講話';
     $('talkStatus').textContent = '';

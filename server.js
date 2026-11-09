@@ -12,6 +12,7 @@ const A = require('./lib/auth');
 const { Media, PHOTO_MAX_BYTES, PHOTO_RETENTION_MS, PHOTO_QUOTA_BYTES, TEXT_MAX, ALLOWED_MIME, sniffMime } = require('./lib/media');
 const Orgs = require('./lib/orgs');
 const Billing = require('./lib/billing');
+const Stt = require('./lib/stt');
 
 const PORT = +process.env.PORT || 8800;
 const PUB = path.join(__dirname, 'public');
@@ -142,6 +143,7 @@ const online = new Map();
 const floors = new Map();
 /** conv -> { from, fromName, toName, ts, durMs }：純文字的最近說話者 */
 const lastTalk = new Map();
+const lastSpeaker = new Map(); // conv -> { userId, until } 供字幕在鬆開後短暫送出最終結果
 /** userId -> { lat, lng, acc, battery, charging, ts }：只留最新一筆，不做軌跡 */
 const locations = new Map();
 /** alertId -> { id, userId, name, channel, channelName, lat, lng, acc, ts, notified:Set } */
@@ -250,6 +252,7 @@ function endFloor(conv, reason, extra = {}) {
   const f = floors.get(conv); if (!f) return;
   floors.delete(conv); clearTimeout(f.timer);
   if (f.ws.talking === conv) f.ws.talking = null;
+  lastSpeaker.set(conv, { userId: f.userId, until: now() + 4000 });
   let info = null;
   if (f.bytes > 0) {
     let toName; if (isDm(conv)) toName = nameOf(dmParts(conv).find(x => x !== f.userId));
@@ -464,7 +467,7 @@ async function api(req, res, p, url) {
   const method = req.method;
   if (p === '/api/health') {
     const ms = await media.stats();
-    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, orgs: D().orgs.length, activeTalks: floors.size, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES });
+    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, orgs: D().orgs.length, activeTalks: floors.size, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, serverStt: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES });
   }
   if (p === '/api/login' && method === 'POST') {
     const b = await readBody(req); if (!b) return json(res, 400, { error: 'bad_request' });
@@ -860,6 +863,28 @@ wss.on('connection', (ws) => {
         sendUser(item.from, { t: 'dispatch_done', id: item.id });
         if (item.heldBy) sendUser(item.heldBy, { t: 'dispatch_done', id: item.id });
         broadcastDispatchers({ t: 'queue', items: queueView(orgIdOf(me)) }, orgIdOf(me));
+        break;
+      }
+      case 'caption': {
+        const conv = String(m.conv || ws.talking || (o && o.channel) || '');
+        const text = String(m.text || '').replace(/\u0000/g, '').trim().slice(0, TEXT_MAX);
+        if (!text || !conv || !canAccess(me, conv)) return;
+        const holding = floors.get(conv) && floors.get(conv).userId === me.id;
+        const rec = lastSpeaker.get(conv);
+        const recent = rec && rec.userId === me.id && rec.until > now();
+        if (!holding && !recent) return send(ws, { t: 'error', code: 'forbidden', msg: '只有正在講話的人可以送出字幕' });
+        const interim = !!m.interim;
+        const cap = { t: 'caption', conv, from: me.id, fromName: me.displayName, text, interim, ts: now() };
+        broadcastConv(conv, cap);
+        if (!interim) {
+          const org = orgById(orgIdOf(me));
+          if (org && org.settings && org.settings.saveCaptions) {
+            const msg = { id: 'm' + uid(8), conv, from: me.id, fromName: me.displayName, kind: 'caption', text, ts: cap.ts };
+            media.addMessage(msg).catch(e => console.error('[caption]', e.message));
+            broadcastConv(conv, { t: 'chat', message: msg }, me.id);
+            sendUser(me.id, { t: 'chat', message: msg });
+          }
+        }
         break;
       }
       case 'chat': {

@@ -84,6 +84,7 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 
 - `storage`：`postgres` 或 `json`（本機無 `DATABASE_URL` 時）
 - `storesAudio` 永遠為 `false`
+- `serverStt` 永遠為 `false`（字幕由客戶端產生，伺服器不做語音辨識）
 - `orgs`：公司數量（含預設公司）
 - `dispatchQueue`：記憶體中尚未結束的調度台呼叫數（含等候中與進行中）
 - `online`／`channels`／`users` 目前是全站合計（原型洩漏，正式環境不應公開）
@@ -195,7 +196,7 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 | GET | `/api/admin/alerts` | 本公司進行中警報 |
 | POST | `/api/admin/alerts/:id/resolve` | 解除警報 |
 | GET | `/api/admin/settings` | `{ "settings": { "saveCaptions": false }, "org": { ... } }` |
-| PATCH | `/api/admin/settings` | `{ "saveCaptions": true 或 false }`（公司管理員可開關；即時語音轉文字若開啟會用到） |
+| PATCH | `/api/admin/settings` | `{ "saveCaptions": true 或 false }`。開啟後，講話者送出的**最終字幕**會以文字訊息（`kind: "caption"`）保存；即時（interim）字幕不存。語音永不保存。 |
 
 管理員不能停用自己或移除自己的管理員權限（`400 self_lockout`）。停用／重設密碼會立即踢下線。
 
@@ -567,6 +568,32 @@ wss://<host>/ws
 
 ---
 
+
+#### `caption` — 即時語音轉文字
+
+客戶端（正在講話的人，或剛結束發話約 4 秒內）送出：
+
+```json
+{ "t": "caption", "conv": "lobby", "text": "請到三號門", "interim": true }
+```
+
+- `conv`：目前對講的頻道或一對一 `dm:…`
+- `text`：字幕文字，最長與一般文字訊息相同（2000 字）
+- `interim`：`true` 表示辨識中的草稿；`false` 表示一句完成
+
+伺服器轉發給該對話的收聽者（含調度監聽）：
+
+```json
+{ "t": "caption", "conv": "lobby", "from": "u…", "fromName": "小明", "text": "請到三號門", "interim": false, "ts": 1731200000000 }
+```
+
+不是發言者送出會回 `{ "t": "error", "code": "forbidden" }`。  
+若該公司 `settings.saveCaptions === true` 且 `interim === false`，伺服器會再送一則 `{ "t": "chat", "message": { "kind": "caption", "text": "…", ... } }`，並寫入文字紀錄。**不會保存任何音訊。**
+
+原生 App 請優先使用裝置端辨識（iOS Speech、Android SpeechRecognizer），把結果用上述 JSON 送出；**不要把語音上傳到本伺服器做轉寫**。本伺服器沒有接付費 STT API；`lib/stt.js` 只是預留的空介面。
+
+瀏覽器網頁版使用 Web Speech API（`lang: "zh-TW"`）。不支援時應顯示說明並繼續對講。Chrome／Edge 可能會把聲音送到瀏覽器廠商的服務。
+
 ## 4. 音訊封包（PCM 16 kHz）
 
 伺服器**不保存**這些資料，只轉發後丟棄（記憶體裡只留「已收到位元組數」用來算時長與偵測斷流）。
@@ -764,6 +791,7 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 9. 文字／照片：`GET/POST /api/messages`、`POST /api/photos`、`GET /api/photos/:id`（帶 Bearer，不要把 token 放進 URL）
 10. 若要做調度功能：`listen`、顯示 `queue`、`dispatch_call` / `dispatch_pickup` / `dispatch_transfer` / `dispatch_done`
 11. 若要做多公司：保存上次使用的公司代碼；處理 `need_org`／`org_disabled`／`org_expired`／`seat_limit`；公司管理員走 `/api/admin/*`，平台管理員另接 `/api/platform/*` 與佔位的 `/api/billing/checkout`（不要當成真實付款成功）
-12. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
+12. 即時字幕：在裝置端辨識（建議 `zh-TW`），於取得發言權後送 `caption`；處理收到的 `caption` 與（若公司開啟存檔）`chat` 且 `kind === "caption"`。不要上傳音訊到本伺服器。不支援辨識時顯示說明即可
+13. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
 
 背景限制與音訊解鎖細節見專案根目錄 `README.md`。

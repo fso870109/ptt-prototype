@@ -61,10 +61,19 @@
 - 人數上限依該公司的 `seatLimit`（未另外設定時跟方案走）；超過回 `403 seat_limit`。免費方案預設不過期；付費方案新建時給 14 天試用。
 - 照片總配額 300MB 目前仍是全站共用（各公司尚未分開計算），這是已知限制。
 
+
+### 即時語音轉文字
+- 講話時，若瀏覽器支援 **Web Speech API**，會用 `zh-TW` 即時辨識，並把字幕文字廣播給同頻道／同一通對講的人（含正在監聽的調度員）。
+- **伺服器不保存、也不轉送語音去做辨識**；只傳遞文字。伺服器端 STT 僅保留 `lib/stt.js` 的可插拔空介面（回 `not_implemented`），沒有接任何付費或需要 API 金鑰的雲端服務。
+- 公司管理員可在後台打開「把最終字幕存成文字紀錄」：只有辨識完成的句子會以 `kind: "caption"` 的文字訊息保存，語音本身永不保存。預設關閉。
+- 不支援的瀏覽器（常見於 **Firefox** 與部分 **iOS Safari**）會看到說明文字，對講功能不受影響，只是沒有字幕。
+- Chrome／Edge 的 Web Speech API 可能會把聲音送到瀏覽器廠商的辨識服務；這不是本伺服器，請在隱私需求高的場合改用系統內建／裝置端辨識的原生 App（送字幕文字即可，見 `docs/API.md`）。
+- 同時開麥克風對講與瀏覽器語音辨識，少數裝置可能較不穩或需要再允許一次權限。
+
 ## 架構
 ```
 手機瀏覽器 ──WebSocket /ws（hello 帶 token）──▶ Node.js 伺服器 ──▶ 同頻道／私訊的線上成員
-   │  JSON：join / ptt_start / ptt_stop / loc / alert_start / alert_resolve / listen / dispatch_* / chat …
+   │  JSON：join / ptt_start / ptt_stop / loc / alert_start / alert_resolve / listen / dispatch_* / chat / caption …
    │  二進位：16kHz 16-bit PCM（每包約 100ms），伺服器加 streamId 後轉發即丟棄
    └──HTTP：/api/login（需公司代碼）、/api/me、/api/locations、/api/alerts、/api/messages、/api/photos、/api/admin/*、/api/platform/*、/api/billing/checkout、靜態檔（含 /dispatch、/platform）
 記憶體：線上狀態、floor、最近說話者、位置（最新一筆）、警報
@@ -94,6 +103,7 @@
 | `server.js` | HTTP + WebSocket、floor control（優先權）、位置、警報、聊天／照片、調度監聽與佇列、多公司隔離、後台 API |
 | `lib/store.js` / `lib/auth.js` | 持久化（Postgres / JSON）、密碼雜湊與 token |
 | `lib/orgs.js` / `lib/billing.js` | 公司遷移與方案預設、金流佔位回應 |
+| `lib/stt.js` | 伺服器端 STT 佔位介面（預設不實作、不處理音訊） |
 | `public/index.html` `app.js` `style.css` | 對講 App（PWA） |
 | `public/admin.html` `admin.js` `admin.css` | 公司後台 |
 | `public/platform.html` `platform.js` | 平台後台 |
@@ -102,7 +112,7 @@
 | `render.yaml` | Render Blueprint（web service + free Postgres） |
 | `docs/API.md` | 供原生 App 使用的協定說明 |
 | `lib/media.js` | 文字／照片儲存與 7 天／容量清理 |
-| `test/e2e.js` | 協定層測試（多帳號；登入、後台、權限、優先搶話、位置、警報、文字／照片、調度台、多公司隔離／座位／到期／金流佔位、不保存錄音） |
+| `test/e2e.js` | 協定層測試（多帳號；登入、後台、權限、優先搶話、位置、警報、文字／照片、調度台、多公司隔離／座位／到期／金流佔位、即時字幕、不保存錄音） |
 | `test/browser_e2e.py` | 真實瀏覽器測試（Chromium + 假麥克風 + 模擬定位） |
 
 ## 本機啟動
@@ -138,4 +148,5 @@ ADMIN_USERNAME=admin ADMIN_PASSWORD=... python3 test/browser_e2e.py http://local
 - 單一 Node 程序；整份狀態存成一列 JSONB，適合幾十～幾百個帳號的測試規模，不適合正式上線。
 - 收費只是佔位：沒有真實金流、發票或自動續約；到期後需平台管理員手動標記已付款。
 - 照片 300MB 配額目前全站共用，尚未依公司分開計算。
+- 即時字幕依瀏覽器 Web Speech API，不是我們自己的辨識引擎；不支援的瀏覽器沒有字幕。Chrome 可能把聲音送到 Google。
 - 沒有雙因素驗證、沒有密碼找回信；token 存在瀏覽器 localStorage。

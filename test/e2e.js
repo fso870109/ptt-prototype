@@ -262,6 +262,34 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('結束呼叫後雙方收到通知', !!(await C[m1.id].wait(m => m.t === 'dispatch_done')) && !!(await D2.wait(m => m.t === 'dispatch_done')));
     for (const c of [D1, D2]) try { c.ws.close(); } catch {}
 
+
+    // ===== 即時語音轉文字 =====
+    const homeHtml = await (await fetch(BASE + '/')).text();
+    ok('對講頁面含即時字幕區塊與說明', homeHtml.includes('id="captionLive"') && homeHtml.includes('id="sttHint"'));
+    const set0 = await http('GET', '/api/admin/settings', null, adminTok);
+    ok('公司預設不儲存字幕', set0.status === 200 && set0.body.settings && set0.body.settings.saveCaptions === false);
+    C[m1.id].clear(); C[m2.id].clear();
+    const gCap = await talk(C[m1.id], CH);
+    C[m1.id].send({ t: 'caption', conv: CH, text: '臨時字幕一二', interim: true });
+    const capI = await C[m2.id].wait(m => m.t === 'caption' && m.text === '臨時字幕一二');
+    ok('發言中的即時字幕會轉發給同頻道', gCap.t === 'floor_granted' && capI.interim === true && capI.from === m1.id);
+    C[m2.id].send({ t: 'caption', conv: CH, text: '不該出現', interim: false });
+    await sleep(250);
+    ok('非發言者不能送字幕', !C[m1.id].has(m => m.t === 'caption' && m.text === '不該出現'));
+    C[m1.id].send({ t: 'caption', conv: CH, text: '最終字幕甲', interim: false });
+    await C[m2.id].wait(m => m.t === 'caption' && m.text === '最終字幕甲' && m.interim === false);
+    const histOff = await http('GET', `/api/messages?conv=${CH}`, null, tok[m2.id]);
+    ok('未開啟存檔時最終字幕不會寫入文字紀錄', !(histOff.body.messages || []).some(x => x.text === '最終字幕甲'));
+    const onSave = await http('PATCH', '/api/admin/settings', { saveCaptions: true }, adminTok);
+    ok('公司管理員可開啟儲存字幕', onSave.status === 200 && onSave.body.settings.saveCaptions === true);
+    C[m2.id].clear();
+    C[m1.id].send({ t: 'caption', conv: CH, text: '存檔字幕乙', interim: false });
+    const capChat = await C[m2.id].wait(m => m.t === 'chat' && m.message && m.message.kind === 'caption' && m.message.text === '存檔字幕乙');
+    const histOn = await http('GET', `/api/messages?conv=${CH}`, null, tok[m2.id]);
+    ok('開啟存檔後最終字幕以文字保存（不存語音）', !!capChat && (histOn.body.messages || []).some(x => x.kind === 'caption' && x.text === '存檔字幕乙'));
+    C[m1.id].send({ t: 'ptt_stop' });
+    await http('PATCH', '/api/admin/settings', { saveCaptions: false }, adminTok);
+
     // ===== 後台操作即時生效 =====
     await http('DELETE', `/api/admin/channels/${CH}/members/${lis.id}`, null, adminTok);
     const moved = await C[lis.id].wait(m => m.t === 'joined' && m.reason === 'access_changed');
@@ -370,6 +398,7 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
   } finally {
     // ===== 清理測試資料 =====
     if (adminTok) {
+      await http('PATCH', '/api/admin/settings', { saveCaptions: false }, adminTok);
       for (const id of created.channels) await http('DELETE', `/api/admin/channels/${id}`, null, adminTok);
       for (const id of created.users) await http('DELETE', `/api/admin/users/${id}`, null, adminTok);
       for (const id of created.orgs) await http('DELETE', `/api/platform/orgs/${id}`, null, adminTok);
