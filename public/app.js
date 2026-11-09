@@ -1,26 +1,25 @@
 'use strict';
-// ====== 一鍵對講 PTT 原型（前端）======
+// ====== 一鍵對講 PTT 原型（前端・第二階段）======
 // 語音格式：16kHz / 16-bit / 單聲道 PCM，每 ~100ms 一包，透過 WebSocket 二進位訊框傳送。
 // 語音只即時播放，不錄存：伺服器與瀏覽器都不保留任何音訊。
 const $ = (s) => document.querySelector(s);
 const SR = 16000;
 const store = {
-  get id() { let v = localStorage.getItem('ptt_id'); if (!v) { v = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36)).replace(/[^0-9a-zA-Z_-]/g, ''); localStorage.setItem('ptt_id', v); } return v; },
-  get name() { return localStorage.getItem('ptt_name') || ''; }, set name(v) { localStorage.setItem('ptt_name', v); },
-  get channel() { return localStorage.getItem('ptt_channel') || ''; }, set channel(v) { localStorage.setItem('ptt_channel', v); },
+  get token() { return localStorage.getItem('ptt_token') || ''; }, set token(v) { v ? localStorage.setItem('ptt_token', v) : localStorage.removeItem('ptt_token'); },
+  get channel() { return localStorage.getItem('ptt_channel') || ''; }, set channel(v) { localStorage.setItem('ptt_channel', v || ''); },
+  get shareLoc() { return localStorage.getItem('ptt_share_loc') === '1'; }, set shareLoc(v) { localStorage.setItem('ptt_share_loc', v ? '1' : '0'); },
 };
+const ROLE_LABEL = { supervisor: '主管', member: '一般', listener: '只聽' };
 
 const S = {
-  ws: null, connected: false, retry: 0, myId: store.id, myName: '',
+  ws: null, connected: false, retry: 0, me: null, myId: '',
   channels: [], channel: '', members: [], online: [], dms: [],
   target: null,           // {type:'channel', id, name} | {type:'dm', peerId, peerName, conv}
-  log: [], liveStreams: new Map(),        // log：本次開啟期間的「誰說過話」純文字紀錄
-  lastTalk: {},                           // conv -> {fromName, ts, durMs}（伺服器提供的最近說話者）
-  // streamId -> {nextTime, from, conv, gotAudio}
+  log: [], liveStreams: new Map(), lastTalk: {},
   activeTalks: new Map(),  // conv -> {from, fromName, streamId}
   pressing: false, granted: false, streamId: 0, pending: [], pendingConv: '',
+  alerts: new Map(), ackedAlerts: new Set(), locs: new Map(),
 };
-
 // ---------- 音訊：AudioContext 解鎖（iOS Safari 必須在使用者手勢中 resume）----------
 let actx = null;
 function audioCtx() {
@@ -110,15 +109,16 @@ function sendAudio(pkt) {
 
 // ---------- PTT 按鈕 ----------
 const btn = $('#ptt');
+function myRoleHere() { if (!S.target || S.target.type === 'dm') return 'member'; const c = S.channels.find(x => x.id === S.target.id); return c ? c.myRole : null; }
+function myAlert() { for (const a of S.alerts.values()) if (a.userId === S.myId) return a; return null; }
 async function pttDown(e) {
   e.preventDefault();
   if (S.pressing || btn.disabled) return;
   if (!S.connected) return toast('尚未連線');
   unlockAudio();
   const t = S.target; if (!t) return;
+  if (myRoleHere() === 'listener' && !myAlert()) { toast('你在這個頻道是「只聽」角色，不能發話'); return; }
   const conv = t.type === 'dm' ? t.conv : t.id;
-  const busy = S.activeTalks.get(conv);
-  if (busy && busy.from !== S.myId) { flashBusy(busy.fromName); return; }
   S.pressing = true; S.granted = false; S.pending = []; S.pendingConv = conv;
   btn.classList.add('pressing'); $('#pttText').textContent = '連線中…';
   if (navigator.vibrate) navigator.vibrate(20);
@@ -129,11 +129,9 @@ function pttUp(e) {
   if (e) e.preventDefault();
   if (!S.pressing) return;
   S.pressing = false;
-  // 最後一小段（<100ms）不足一包的資料直接捨棄，影響很小
-  if (S.granted) wsSend({ t: 'ptt_stop' });
-  else wsSend({ t: 'ptt_stop' });
+  wsSend({ t: 'ptt_stop' });
   S.granted = false; S.pending = [];
-  btn.classList.remove('pressing', 'talking'); $('#pttText').textContent = '按住講話'; $('#meterBar').style.width = '0';
+  btn.classList.remove('pressing', 'talking'); $('#meterBar').style.width = '0';
   releaseMicLater(); updateTalkStatus();
 }
 btn.addEventListener('pointerdown', (e) => { btn.setPointerCapture && btn.setPointerCapture(e.pointerId); pttDown(e); });
@@ -141,76 +139,190 @@ btn.addEventListener('pointerup', pttUp);
 btn.addEventListener('pointercancel', pttUp);
 btn.addEventListener('lostpointercapture', pttUp);
 btn.addEventListener('contextmenu', (e) => e.preventDefault());
-// 鍵盤：電腦上按住空白鍵講話
-document.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat && document.activeElement.tagName !== 'INPUT') pttDown(e); });
-document.addEventListener('keyup', (e) => { if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT') pttUp(e); });
+document.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) && !$('#main').classList.contains('hidden')) pttDown(e); });
+document.addEventListener('keyup', (e) => { if (e.code === 'Space' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) pttUp(e); });
 window.addEventListener('blur', () => pttUp());
-
 function flashBusy(name) {
   btn.classList.add('busy'); $('#pttText').textContent = `${name || '有人'} 正在說話`;
   if (navigator.vibrate) navigator.vibrate([30, 40, 30]);
-  setTimeout(() => { btn.classList.remove('busy'); if (!S.pressing) $('#pttText').textContent = '按住講話'; }, 1500);
+  setTimeout(() => { btn.classList.remove('busy'); if (!S.pressing) updateTalkStatus(); }, 1500);
 }
+
+// ---------- 緊急警報按鈕（長按 2 秒，防誤觸）----------
+const sos = $('#sos'); let sosTimer = null;
+function sosDown(e) {
+  e.preventDefault(); if (!S.connected) return toast('尚未連線');
+  unlockAudio(); sos.setPointerCapture && e.pointerId !== undefined && sos.setPointerCapture(e.pointerId);
+  sos.classList.add('holding'); sos.querySelector('.sos-text').textContent = '繼續按住… 放開取消';
+  sosTimer = setTimeout(() => { sosTimer = null; sos.classList.remove('holding'); sos.querySelector('.sos-text').textContent = '🚨 警報已發出'; fireAlert(); setTimeout(resetSos, 2500); }, 2000);
+}
+function sosUp() { if (sosTimer) { clearTimeout(sosTimer); sosTimer = null; resetSos(); toast('已取消（需長按 2 秒）'); } }
+function resetSos() { sos.classList.remove('holding'); sos.querySelector('.sos-text').textContent = myAlert() ? '🚨 警報進行中（點此查看）' : '🚨 長按 2 秒發出緊急警報'; }
+sos.addEventListener('pointerdown', sosDown);
+sos.addEventListener('pointerup', sosUp); sos.addEventListener('pointercancel', sosUp); sos.addEventListener('lostpointercapture', sosUp);
+sos.addEventListener('contextmenu', (e) => e.preventDefault());
+function fireAlert() {
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  const sendIt = (pos) => wsSend({ t: 'alert_start', ...(pos ? { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy } : {}) });
+  if (navigator.geolocation) {
+    let done = false; const t = setTimeout(() => { if (!done) { done = true; sendIt(null); } }, 4000);
+    navigator.geolocation.getCurrentPosition((p) => { if (!done) { done = true; clearTimeout(t); sendIt(p); } }, () => { if (!done) { done = true; clearTimeout(t); sendIt(null); } }, { enableHighAccuracy: true, timeout: 4000, maximumAge: 30000 });
+  } else sendIt(null);
+}
+
+// ---------- 警報顯示 ----------
+let siren = null;
+function startSiren() {
+  if (siren) return;
+  try {
+    const c = audioCtx(); const o = c.createOscillator(); const g = c.createGain();
+    o.type = 'square'; g.gain.value = 0.15; o.connect(g); g.connect(c.destination); o.start();
+    let hi = false; const iv = setInterval(() => { hi = !hi; o.frequency.setValueAtTime(hi ? 960 : 640, c.currentTime); }, 450);
+    siren = { stop() { clearInterval(iv); try { o.stop(); } catch {} } };
+  } catch {}
+  if (navigator.vibrate) navigator.vibrate([400, 200, 400, 200, 400]);
+}
+function stopSiren() { if (siren) { siren.stop(); siren = null; } }
+function mapUrl(a) { return a.lat != null ? `https://www.openstreetmap.org/?mlat=${a.lat}&mlon=${a.lng}#map=17/${a.lat}/${a.lng}` : ''; }
+function renderAlerts() {
+  const list = [...S.alerts.values()];
+  const banner = $('#alertBanner');
+  if (!list.length) { banner.classList.add('hidden'); $('#alertOverlay').classList.add('hidden'); stopSiren(); resetSos(); return; }
+  banner.classList.remove('hidden');
+  banner.textContent = '🚨 ' + list.map(a => `${a.userId === S.myId ? '你' : a.name} 發出緊急警報${a.channelName ? '（' + a.channelName + '）' : ''}`).join('；') + ' — 點此查看';
+  const un = list.find(a => !S.ackedAlerts.has(a.id)) || null;
+  if (un) showAlert(un); else { $('#alertOverlay').classList.add('hidden'); stopSiren(); }
+  resetSos();
+}
+function showAlert(a) {
+  const mine = a.userId === S.myId;
+  $('#alertWho').textContent = mine ? '你已發出緊急警報' : `${a.name} 發出緊急警報`;
+  $('#alertWhere').textContent = (a.channelName ? `頻道：${a.channelName}　` : '') + (a.lat != null ? `位置：${a.lat.toFixed(5)}, ${a.lng.toFixed(5)}${a.acc ? `（±${Math.round(a.acc)}m）` : ''}` : '位置：不明（未取得定位）');
+  $('#alertWhen').textContent = '時間：' + fmtTime(a.ts) + (mine ? ' · 警報期間你擁有最高發話權' : '');
+  const link = $('#alertMapLink'); const u = mapUrl(a);
+  link.classList.toggle('hidden', !u); if (u) link.href = u;
+  const canResolve = (S.me && S.me.role === 'admin') || mine;
+  $('#alertResolve').classList.toggle('hidden', !canResolve);
+  $('#alertResolve').textContent = mine && !(S.me && S.me.role === 'admin') ? '取消我的警報' : '解除警報';
+  $('#alertResolve').dataset.id = a.id; $('#alertAck').dataset.id = a.id;
+  $('#alertOverlay').classList.remove('hidden');
+  if (!mine) startSiren();
+}
+$('#alertAck').addEventListener('click', () => { S.ackedAlerts.add($('#alertAck').dataset.id); stopSiren(); renderAlerts(); });
+$('#alertResolve').addEventListener('click', () => { if (confirm('確定要解除這個警報？')) wsSend({ t: 'alert_resolve', id: $('#alertResolve').dataset.id }); });
+$('#alertBanner').addEventListener('click', () => { const a = [...S.alerts.values()][0]; if (a) { S.ackedAlerts.delete(a.id); showAlert(a); } });
+
+// ---------- 位置與電量 ----------
+let geoWatch = null, lastSent = 0, lastPos = null, battery = null, locTimer = null;
+async function initBattery() {
+  if (battery !== null) return;
+  try { battery = navigator.getBattery ? await navigator.getBattery() : false; } catch { battery = false; }
+}
+function sendLoc(force) {
+  if (!lastPos || !S.connected) return;
+  if (!force && Date.now() - lastSent < 15000) return;
+  lastSent = Date.now();
+  const b = battery ? { battery: battery.level, charging: battery.charging } : {};
+  wsSend({ t: 'loc', lat: lastPos.coords.latitude, lng: lastPos.coords.longitude, acc: lastPos.coords.accuracy, ...b });
+  $('#locStatus').textContent = `已回報 ${fmtTime(Date.now())}${battery ? ` · 電量 ${Math.round(battery.level * 100)}%` : ' · 電量不明'}`;
+}
+async function startLoc() {
+  if (!navigator.geolocation) { toast('此瀏覽器不支援定位'); $('#shareLoc').checked = false; return; }
+  await initBattery();
+  geoWatch = navigator.geolocation.watchPosition((p) => { const first = !lastPos; lastPos = p; sendLoc(first); },
+    (err) => { $('#locStatus').textContent = '無法取得定位：' + (err.code === 1 ? '未授權' : err.message); if (err.code === 1) { $('#shareLoc').checked = false; store.shareLoc = false; stopLoc(); } },
+    { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+  clearInterval(locTimer); locTimer = setInterval(() => sendLoc(true), 30000); // 每 30 秒回報一次
+  $('#locStatus').textContent = '定位中…';
+}
+function stopLoc() { if (geoWatch !== null) navigator.geolocation.clearWatch(geoWatch); geoWatch = null; clearInterval(locTimer); lastPos = null; $('#locStatus').textContent = '未分享'; }
+$('#shareLoc').addEventListener('change', (e) => {
+  store.shareLoc = e.target.checked;
+  if (e.target.checked) startLoc(); else { stopLoc(); wsSend({ t: 'loc_off' }); }
+});
+
+// ---------- 地圖（Leaflet + OpenStreetMap 圖磚）----------
+let map = null; const markers = new Map();
+function ensureMap() {
+  if (map || !window.L) return;
+  map = L.map('map', { zoomControl: true }).setView([23.7, 121], 7);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> 貢獻者' }).addTo(map);
+}
+function ago(ts) { const s = Math.round((Date.now() - ts) / 1000); return s < 60 ? `${s} 秒前` : s < 3600 ? `${Math.round(s / 60)} 分鐘前` : fmtTime(ts); }
+function locLine(l) { return `${esc(l.name)}${l.id === S.myId ? '（你）' : ''} · 電量 ${l.battery == null ? '不明' : l.battery + '%' + (l.charging ? '⚡' : '')} · ${l.online ? '在線' : '離線'} · ${ago(l.ts)}`; }
+function renderLocs() {
+  const list = [...S.locs.values()].sort((a, b) => b.ts - a.ts);
+  $('#locList').innerHTML = list.map(l => `<li data-loc="${esc(l.id)}"><span>📍 ${locLine(l)}</span><span class="meta">${l.channelName ? '#' + esc(l.channelName) : ''}</span></li>`).join('') || `<li class="muted">${S.me && S.me.role === 'admin' ? '還沒有人分享位置' : '同頻道還沒有人分享位置'}</li>`;
+  if (!map) return;
+  for (const [id, mk] of markers) if (!S.locs.has(id)) { map.removeLayer(mk); markers.delete(id); }
+  for (const l of list) {
+    let mk = markers.get(l.id);
+    const html = locLine(l) + (l.acc ? `<br>誤差 ±${l.acc}m` : '');
+    if (!mk) { mk = L.marker([l.lat, l.lng]).addTo(map); markers.set(l.id, mk); }
+    mk.setLatLng([l.lat, l.lng]); mk.bindPopup(html); mk.bindTooltip(esc(l.name), { permanent: true, direction: 'top', offset: [0, -30] });
+  }
+}
+function fitMap() { if (!map) return; const pts = [...S.locs.values()].map(l => [l.lat, l.lng]); if (pts.length === 1) map.setView(pts[0], 15); else if (pts.length > 1) map.fitBounds(pts, { padding: [30, 30], maxZoom: 16 }); }
+$('#locList').addEventListener('click', (e) => { const li = e.target.closest('li[data-loc]'); const l = li && S.locs.get(li.dataset.loc); if (l && map) { map.setView([l.lat, l.lng], 16); markers.get(l.id)?.openPopup(); } });
+setInterval(() => { if (!$('#tab-map').classList.contains('hidden')) renderLocs(); }, 15000);
 
 // ---------- WebSocket ----------
 function wsSend(o) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); }
 function setConn(state, text) { $('#connDot').className = 'dot ' + state; $('#connText').textContent = text; S.connected = state === 'on'; updatePttEnabled(); }
 function connect() {
   clearTimeout(connect.timer);
+  if (!store.token) return showLogin();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = 'arraybuffer'; S.ws = ws;
   setConn('wait', S.retry ? `重新連線中…（第 ${S.retry} 次）` : '連線中…');
-  ws.onopen = () => { S.retry = 0; ws.send(JSON.stringify({ t: 'hello', id: S.myId, name: S.myName })); };
+  ws.onopen = () => { S.retry = 0; ws.send(JSON.stringify({ t: 'hello', token: store.token })); };
   ws.onmessage = (ev) => {
-    if (typeof ev.data !== 'string') {
-      const dv = new DataView(ev.data); const sid = dv.getUint32(0);
-      const pcm = new Int16Array(ev.data.slice(4));
-      playPcm(sid, pcm); return;
-    }
+    if (typeof ev.data !== 'string') { const sid = new DataView(ev.data).getUint32(0); playPcm(sid, new Int16Array(ev.data.slice(4))); return; }
     handle(JSON.parse(ev.data));
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     if (S.ws !== ws) return;
     if (S.pressing) pttUp();
     S.activeTalks.clear(); updateTalkStatus();
+    if (ev.code === 4001 || ev.code === 4003 || S.authFailed) { S.authFailed = false; setConn('off', '請重新登入'); return; }
     const d = Math.min(10000, 1000 * Math.pow(1.6, S.retry++));
     setConn('off', `已斷線，${Math.round(d / 1000)} 秒後重連`);
     connect.timer = setTimeout(connect, d);
   };
   ws.onerror = () => {};
 }
-// 心跳：偵測半開連線（手機切網路時常見）
 setInterval(() => {
   if (!S.ws || S.ws.readyState !== 1) return;
   const ts = Date.now(); wsSend({ t: 'ping', ts });
-  S.lastPingSent = ts;
   setTimeout(() => { if (S.lastPong < ts && S.ws && S.ws.readyState === 1) { try { S.ws.close(); } catch {} } }, 8000);
 }, 15000);
 S.lastPong = Date.now();
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    if (!S.ws || S.ws.readyState > 1) { S.retry = 0; connect(); }
-    else renderActivity();
-  }
-});
-window.addEventListener('online', () => { if (!S.ws || S.ws.readyState > 1) { S.retry = 0; connect(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.token && (!S.ws || S.ws.readyState > 1)) { S.retry = 0; connect(); } });
+window.addEventListener('online', () => { if (store.token && (!S.ws || S.ws.readyState > 1)) { S.retry = 0; connect(); } });
 
 function handle(m) {
   switch (m.t) {
+    case 'auth_failed':
+      S.authFailed = true; store.token = ''; showLogin(m.reason === 'revoked' ? '你的帳號已被停用或密碼已重設，請重新登入' : '登入已過期，請重新登入'); break;
     case 'welcome':
-      S.myId = m.id; S.channels = m.channels; S.dms = m.dms || []; S.online = m.online || [];
+      S.me = m.user; S.myId = m.user.id; S.channels = m.channels; S.dms = m.dms || []; S.online = m.online || [];
+      $('#meName').textContent = m.user.displayName + (m.user.role === 'admin' ? '（管理員）' : '');
+      $('#adminLink').classList.toggle('hidden', m.user.role !== 'admin');
       setConn('on', '已連線');
+      S.alerts = new Map((m.alerts || []).map(a => [a.id, a])); renderAlerts();
       renderChannels(); renderDms(); renderOthers();
       { const want = S.channel || store.channel || 'lobby';
-        const ok = S.channels.some(c => c.id === want) ? want : 'lobby';
-        wsSend({ t: 'join', channel: ok }); }
+        const ok = S.channels.some(c => c.id === want) ? want : (S.channels[0] && S.channels[0].id);
+        if (ok) wsSend({ t: 'join', channel: ok }); else { S.target = null; renderTarget(); } }
+      if (store.shareLoc) { $('#shareLoc').checked = true; if (geoWatch === null) startLoc(); else sendLoc(true); }
       renderActivity();
       break;
     case 'pong': S.lastPong = Date.now(); break;
-    case 'channels': S.channels = m.channels; renderChannels(); break;
-    case 'channel_created': wsSend({ t: 'join', channel: m.channel }); break;
+    case 'channels': S.channels = m.channels; renderChannels(); renderTarget(); break;
     case 'joined': {
+      if (!m.channel) { S.channel = ''; S.target = null; renderTarget(); toast('你已沒有任何頻道的權限'); break; }
+      if (m.reason === 'access_changed') toast('頻道權限已變更，已移回「大廳」');
       const changed = S.channel !== m.channel;
       S.channel = m.channel; store.channel = m.channel;
       const c = S.channels.find(x => x.id === m.channel);
@@ -227,38 +339,51 @@ function handle(m) {
       for (const p of S.pending) S.ws.send(p.buffer); S.pending = [];
       if (navigator.vibrate) navigator.vibrate(40);
       break;
-    case 'floor_denied':
-      if (m.reason === 'busy') { const was = S.pressing; S.pressing = false; S.pending = []; btn.classList.remove('pressing', 'talking'); releaseMicLater(); if (was) flashBusy(m.byName); }
-      else { pttUp(); toast(m.reason === 'offline' ? `${m.byName || '對方'} 目前不在線（不保存錄音，無法留言）` : '無法發話：' + (m.reason === 'no_access' ? '請先加入頻道' : m.reason)); }
+    case 'floor_denied': {
+      const was = S.pressing; S.pressing = false; S.granted = false; S.pending = []; btn.classList.remove('pressing', 'talking'); releaseMicLater();
+      if (m.reason === 'busy') { if (was) flashBusy(m.byName); }
+      else { updateTalkStatus(); toast(m.reason === 'offline' ? `${m.byName || '對方'} 目前不在線（不保存錄音，無法留言）` : m.reason === 'listen_only' ? '你在這個頻道是「只聽」角色，不能發話' : m.reason === 'no_access' ? '你沒有在這裡發話的權限' : '無法發話：' + m.reason); }
       break;
-    case 'floor_revoked': pttUp(); toast(m.reason === 'stalled' ? '網路不穩，語音中斷，已結束發話' : '已達單次發話上限 60 秒'); break;
+    }
+    case 'floor_revoked':
+      pttUp();
+      if (m.reason === 'preempted') { toast(`⚠️ 你的發話被 ${m.byName} 中斷（優先權較高）`); if (navigator.vibrate) navigator.vibrate([100, 50, 100]); }
+      else toast(m.reason === 'stalled' ? '網路不穩，語音中斷，已結束發話' : '已達單次發話上限 60 秒');
+      break;
     case 'talk_start':
-      S.activeTalks.set(m.conv, { from: m.from, fromName: m.fromName, streamId: m.streamId });
+      S.activeTalks.set(m.conv, { from: m.from, fromName: m.fromName, streamId: m.streamId, prio: m.prio });
       S.liveStreams.set(m.streamId, { nextTime: 0, from: m.from, conv: m.conv });
-      unlockIfPossible(); updateTalkStatus();
+      if (actx && actx.state !== 'running') actx.resume().catch(() => {});
+      updateTalkStatus();
       if (m.conv.startsWith('dm:') && !(S.target && S.target.conv === m.conv)) toast(`📞 ${m.fromName} 私人對講中`);
       break;
     case 'talk_end': {
       const a = S.activeTalks.get(m.conv); if (a && a.streamId === m.streamId) S.activeTalks.delete(m.conv);
-      const st = S.liveStreams.get(m.streamId); S.liveStreams.delete(m.streamId);
+      S.liveStreams.delete(m.streamId);
+      if (m.reason === 'preempted' && m.from !== S.myId) S.log.push({ conv: m.conv, note: `${nameById(m.from)} 被 ${m.byName} 中斷`, ts: Date.now() });
       if (m.lastTalk) {
         S.lastTalk[m.conv] = m.lastTalk;
         S.log.push({ conv: m.conv, ...m.lastTalk }); if (S.log.length > 200) S.log.shift();
         if (m.conv.startsWith('dm:')) upsertDm(m.conv, m.lastTalk);
-        if (m.conv === currentConv()) renderActivity();
       }
+      if (m.conv === currentConv()) renderActivity();
       updateTalkStatus();
       break;
     }
     case 'channel_activity': { const c = S.channels.find(x => x.id === m.channel); if (c) { c.last = m.last; c.lastTalk = m.lastTalk; renderChannels(); } break; }
+    case 'loc': S.locs.set(m.loc.id, m.loc); renderLocs(); break;
+    case 'locs': S.locs = new Map(m.locs.map(l => [l.id, l])); renderLocs(); break;
+    case 'loc_remove': S.locs.delete(m.id); renderLocs(); break;
+    case 'alert': S.alerts.set(m.alert.id, m.alert); S.ackedAlerts.delete(m.alert.id); renderAlerts(); break;
+    case 'alert_end': S.alerts.delete(m.id); renderAlerts(); toast(`✅ 警報已由 ${m.by} 解除`); break;
     case 'error': toast(m.msg); break;
   }
 }
-function unlockIfPossible() { if (actx && actx.state !== 'running') actx.resume().catch(() => {}); }
+function nameById(id) { const u = S.online.find(x => x.id === id) || S.members.find(x => x.id === id); return u ? u.name : '某人'; }
 
 // ---------- 畫面 ----------
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function toast(t) { const el = $('#toast'); el.textContent = t; el.classList.remove('hidden'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.add('hidden'), 2600); }
+function toast(t) { const el = $('#toast'); el.textContent = t; el.classList.remove('hidden'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.add('hidden'), 3000); }
 function fmtTime(ts) { const d = new Date(ts); const today = new Date().toDateString() === d.toDateString(); return (today ? '' : `${d.getMonth() + 1}/${d.getDate()} `) + d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); }
 function updatePttEnabled() { btn.disabled = !S.connected || !S.target; }
 function currentConv() { return S.target ? (S.target.type === 'dm' ? S.target.conv : S.target.id) : ''; }
@@ -270,12 +395,19 @@ function updateTalkStatus() {
     else { const c = S.channels.find(x => x.id === conv); parts.push(`🔊 ${a.fromName} 正在說話${conv !== currentConv() ? `（${c ? c.name : ''}）` : ''}`); }
   }
   $('#talkStatus').textContent = parts.join('　') || '\u00a0';
-  const busy = S.activeTalks.get(currentConv());
-  if (!S.pressing) { btn.classList.toggle('busy', !!(busy && busy.from !== S.myId)); $('#pttText').textContent = busy && busy.from !== S.myId ? `${busy.fromName} 正在說話` : '按住講話'; }
+  const listen = myRoleHere() === 'listener' && !myAlert();
+  btn.classList.toggle('listen', listen);
+  if (!S.pressing) {
+    const busy = S.activeTalks.get(currentConv());
+    btn.classList.toggle('busy', !!(busy && busy.from !== S.myId));
+    $('#pttText').textContent = listen ? '只聽（不能發話）' : busy && busy.from !== S.myId ? `${busy.fromName} 正在說話` : '按住講話';
+  }
 }
 function renderTarget() {
   const t = S.target;
   $('#targetLabel').textContent = !t ? '尚未加入頻道' : t.type === 'dm' ? `🔒 私人對講：${t.peerName}` : `# ${t.name}`;
+  const r = t && t.type === 'channel' ? myRoleHere() : null;
+  const rb = $('#roleBadge'); rb.classList.toggle('hidden', !r); rb.className = 'role-badge ' + (r || '') + (r ? '' : ' hidden'); rb.textContent = r ? `我的角色：${ROLE_LABEL[r]}` : '';
   $('#backToChannel').classList.toggle('hidden', !(t && t.type === 'dm'));
   updatePttEnabled(); updateTalkStatus();
 }
@@ -283,17 +415,17 @@ function renderChannels() {
   $('#channelList').innerHTML = S.channels.map(c => {
     if (c.lastTalk) S.lastTalk[c.id] = c.lastTalk;
     const lt = c.lastTalk ? ` · 最近：${esc(c.lastTalk.fromName)} ${fmtTime(c.lastTalk.ts)}` : '';
-    return `<li data-ch="${esc(c.id)}" class="${c.id === S.channel ? 'active' : ''}"><span># ${esc(c.name)}</span><span class="meta">${c.online} 人在線${lt}</span></li>`;
-  }).join('');
+    return `<li data-ch="${esc(c.id)}" class="${c.id === S.channel ? 'active' : ''}"><span># ${esc(c.name)} <span class="role-badge ${c.myRole}">${ROLE_LABEL[c.myRole]}</span></span><span class="meta">${c.online} 人在線${lt}</span></li>`;
+  }).join('') || '<li class="muted">你目前沒有任何頻道，請聯絡管理員</li>';
   const c = S.channels.find(x => x.id === S.channel); if (c && S.target && S.target.type === 'channel' && S.target.name !== c.name) { S.target.name = c.name; renderTarget(); }
 }
 function renderMembers() {
-  $('#memberList').innerHTML = S.members.map(u => `<li data-uid="${esc(u.id)}" data-name="${esc(u.name)}"><span>🟢 ${esc(u.name)}${u.id === S.myId ? '（你）' : ''}</span>${u.id === S.myId ? '' : '<span class="meta">私人對講 ›</span>'}</li>`).join('') || '<li class="muted">（沒有人）</li>';
+  $('#memberList').innerHTML = S.members.map(u => `<li data-uid="${esc(u.id)}" data-name="${esc(u.name)}"><span>🟢 ${esc(u.name)}${u.id === S.myId ? '（你）' : ''} <span class="role-badge ${u.role}">${ROLE_LABEL[u.role] || ''}</span></span>${u.id === S.myId ? '' : '<span class="meta">私人對講 ›</span>'}</li>`).join('') || '<li class="muted">（沒有人）</li>';
 }
 function renderOthers() {
   const ids = new Set(S.members.map(u => u.id));
   const others = S.online.filter(u => !ids.has(u.id) && u.id !== S.myId);
-  $('#otherList').innerHTML = others.map(u => { const c = S.channels.find(x => x.id === u.channel); return `<li data-uid="${esc(u.id)}" data-name="${esc(u.name)}"><span>🟢 ${esc(u.name)}</span><span class="meta">${c ? '#' + esc(c.name) : ''} · 私人對講 ›</span></li>`; }).join('') || '<li class="muted">（沒有）</li>';
+  $('#otherList').innerHTML = others.map(u => `<li data-uid="${esc(u.id)}" data-name="${esc(u.name)}"><span>🟢 ${esc(u.name)}</span><span class="meta">私人對講 ›</span></li>`).join('') || '<li class="muted">（沒有）</li>';
 }
 function upsertDm(conv, lt) {
   const peerId = conv.slice(3).split(':').find(x => x !== S.myId) || S.myId;
@@ -305,53 +437,55 @@ function upsertDm(conv, lt) {
 }
 function renderDms() {
   S.dms.sort((a, b) => b.last - a.last);
-  $('#dmList').innerHTML = S.dms.map(d => {
-    if (d.lastTalk) S.lastTalk[d.conv] = d.lastTalk;
-    return `<li data-uid="${esc(d.peerId)}" data-name="${esc(d.peerName)}"><span>🔒 ${esc(d.peerName)}</span><span class="meta">最近 ${fmtTime(d.last)}</span></li>`;
-  }).join('') || '<li class="muted">還沒有私人對講。到「成員」點一個人即可開始。</li>';
+  $('#dmList').innerHTML = S.dms.map(d => { if (d.lastTalk) S.lastTalk[d.conv] = d.lastTalk; return `<li data-uid="${esc(d.peerId)}" data-name="${esc(d.peerName)}"><span>🔒 ${esc(d.peerName)}</span><span class="meta">最近 ${fmtTime(d.last)}</span></li>`; }).join('') || '<li class="muted">還沒有私人對講。到「成員」點一個人即可開始。</li>';
 }
 function openDm(peerId, peerName) {
   if (peerId === S.myId) return;
   const conv = 'dm:' + [S.myId, peerId].sort().join(':');
   S.target = { type: 'dm', peerId, peerName, conv }; renderTarget(); renderActivity(); renderDms();
 }
-
-// ---------- 最近說話（純文字，不含音訊）----------
 function renderActivity() {
-  const conv = currentConv();
-  const lt = S.lastTalk[conv];
+  const conv = currentConv(); const lt = S.lastTalk[conv];
   $('#lastTalk').textContent = lt ? `最近說話：${lt.from === S.myId ? '我' : lt.fromName} · ${fmtTime(lt.ts)} · ${(lt.durMs / 1000).toFixed(1)} 秒` : '這裡還沒有人說話';
   const items = S.log.filter(x => x.conv === conv).slice(-30).reverse();
-  $('#activityList').innerHTML = items.map(x => `<li class="${x.from === S.myId ? 'mine' : ''}"><span class="who">${esc(x.from === S.myId ? '我' : x.fromName)}</span><span class="when">${fmtTime(x.ts)} · ${(x.durMs / 1000).toFixed(1)} 秒</span></li>`).join('') || '<li class="muted">本次開啟後還沒有對講</li>';
+  $('#activityList').innerHTML = items.map(x => x.note ? `<li class="muted"><span>⚠️ ${esc(x.note)}</span><span class="when">${fmtTime(x.ts)}</span></li>` : `<li class="${x.from === S.myId ? 'mine' : ''}"><span class="who">${esc(x.from === S.myId ? '我' : x.fromName)}</span><span class="when">${fmtTime(x.ts)} · ${(x.durMs / 1000).toFixed(1)} 秒</span></li>`).join('') || '<li class="muted">本次開啟後還沒有對講</li>';
 }
 
 // ---------- 事件 ----------
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
-  ['channels', 'members', 'dms'].forEach(t => $('#tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
+  ['channels', 'members', 'dms', 'map'].forEach(t => $('#tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
+  if (b.dataset.tab === 'map') { ensureMap(); setTimeout(() => { map && map.invalidateSize(); renderLocs(); fitMap(); }, 50); wsSend({ t: 'get_locs' }); }
 }));
 $('#channelList').addEventListener('click', (e) => { const li = e.target.closest('li[data-ch]'); if (!li) return; if (li.dataset.ch === S.channel) { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); } else wsSend({ t: 'join', channel: li.dataset.ch }); });
-$('#createChannel').addEventListener('click', () => { const n = $('#newChannel').value.trim(); if (!n) return toast('請輸入頻道名稱'); wsSend({ t: 'create_channel', name: n }); $('#newChannel').value = ''; });
-$('#newChannel').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#createChannel').click(); });
 ['#memberList', '#otherList', '#dmList'].forEach(sel => $(sel).addEventListener('click', (e) => { const li = e.target.closest('li[data-uid]'); if (li) openDm(li.dataset.uid, li.dataset.name); }));
 $('#backToChannel').addEventListener('click', () => { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); });
-$('#logout').addEventListener('click', () => { localStorage.removeItem('ptt_name'); location.reload(); });
+$('#logout').addEventListener('click', async () => {
+  try { await fetch('/api/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + store.token } }); } catch {}
+  store.token = ''; stopLoc(); location.reload();
+});
 
-function enter() {
-  const n = $('#nick').value.trim(); if (!n) return toast('請輸入暱稱');
-  unlockAudio();
-  S.myName = n; store.name = n;
-  $('#meName').textContent = n;
-  $('#login').classList.add('hidden'); $('#main').classList.remove('hidden');
-  connect();
+function showLogin(msg) {
+  try { S.ws && S.ws.close(); } catch {}
+  $('#main').classList.add('hidden'); $('#login').classList.remove('hidden');
+  $('#loginErr').textContent = msg || '';
 }
-$('#enter').addEventListener('click', enter);
-$('#nick').addEventListener('keydown', (e) => { if (e.key === 'Enter') enter(); });
-$('#nick').value = store.name;
-if (store.name) {
-  // 已登入過：直接進入；AudioContext 會在第一次觸碰時解鎖
-  S.myName = store.name; $('#meName').textContent = store.name;
-  $('#login').classList.add('hidden'); $('#main').classList.remove('hidden'); connect();
+function showMain() { $('#login').classList.add('hidden'); $('#main').classList.remove('hidden'); connect(); }
+$('#loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault(); unlockAudio();
+  const username = $('#username').value.trim(), password = $('#password').value;
+  if (!username || !password) { $('#loginErr').textContent = '請輸入帳號與密碼'; return; }
+  $('#enter').disabled = true; $('#loginErr').textContent = '';
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { $('#loginErr').textContent = j.message || '登入失敗'; return; }
+    store.token = j.token; $('#password').value = ''; S.retry = 0; showMain();
+  } catch { $('#loginErr').textContent = '無法連線到伺服器（若剛喚醒請稍候再試）'; }
+  finally { $('#enter').disabled = false; }
+});
+if (store.token) {
+  showMain();
   toast('點一下畫面任一處以啟用聲音');
   document.addEventListener('pointerdown', function once() { unlockAudio(); document.removeEventListener('pointerdown', once); });
 }

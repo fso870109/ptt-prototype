@@ -9,40 +9,42 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg">
 <link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="/style.css">
 <title>一鍵對講 PTT 原型</title>
 </head>
 <body>
 <!-- 登入 -->
 <section id="login" class="screen">
-  <div class="login-card">
+  <form class="login-card" id="loginForm" autocomplete="on">
     <div class="logo">📻</div>
     <h1>一鍵對講</h1>
-    <p class="sub">PTT 原型 · 第一階段</p>
-    <input id="nick" maxlength="20" placeholder="輸入你的暱稱" autocomplete="nickname">
-    <button id="enter" class="primary">進入</button>
-    <p class="hint">按「進入」時會啟用聲音播放；第一次按住講話時瀏覽器會詢問麥克風權限。</p>
-  </div>
+    <p class="sub">PTT 原型 · 第二階段</p>
+    <input id="username" name="username" maxlength="32" placeholder="帳號" autocomplete="username" autocapitalize="none" spellcheck="false">
+    <input id="password" name="password" type="password" maxlength="100" placeholder="密碼" autocomplete="current-password">
+    <button id="enter" class="primary" type="submit">登入</button>
+    <p id="loginErr" class="err"></p>
+    <p class="hint">帳號由管理員在後台建立。按「登入」時會啟用聲音播放；第一次按住講話時瀏覽器會詢問麥克風權限。</p>
+  </form>
 </section>
 
 <!-- 主畫面 -->
 <section id="main" class="screen hidden">
   <header class="topbar">
     <div class="conn"><span id="connDot" class="dot off"></span><span id="connText">未連線</span></div>
-    <div class="me"><span id="meName"></span> <button id="logout" class="link">登出</button></div>
+    <div class="me"><span id="meName"></span> <a id="adminLink" class="link hidden" href="/admin">後台</a> <button id="logout" class="link">登出</button></div>
   </header>
+
+  <div id="alertBanner" class="alert-banner hidden"></div>
 
   <nav class="tabs">
     <button data-tab="channels" class="active">頻道</button>
     <button data-tab="members">成員</button>
     <button data-tab="dms">私訊</button>
+    <button data-tab="map">地圖</button>
   </nav>
 
   <div class="panel" id="tab-channels">
-    <div class="row">
-      <input id="newChannel" maxlength="30" placeholder="新頻道名稱">
-      <button id="createChannel">建立</button>
-    </div>
     <ul id="channelList" class="list"></ul>
   </div>
   <div class="panel hidden" id="tab-members">
@@ -54,9 +56,18 @@
   <div class="panel hidden" id="tab-dms">
     <ul id="dmList" class="list"></ul>
   </div>
+  <div class="panel map-panel hidden" id="tab-map">
+    <div class="row loc-row">
+      <label class="switch"><input type="checkbox" id="shareLoc"> 分享我的位置與電量</label>
+      <span id="locStatus" class="muted small"></span>
+    </div>
+    <div id="map"></div>
+    <ul id="locList" class="list loc-list"></ul>
+  </div>
 
   <div class="target">
     <div id="targetLabel" class="target-label">尚未加入頻道</div>
+    <span id="roleBadge" class="role-badge hidden"></span>
     <button id="backToChannel" class="link hidden">← 回到頻道</button>
   </div>
 
@@ -67,6 +78,7 @@
       <span id="pttText">按住講話</span>
     </button>
     <div id="meter" class="meter"><div id="meterBar"></div></div>
+    <button id="sos" class="sos" type="button"><span class="sos-fill"></span><span class="sos-text">🚨 長按 2 秒發出緊急警報</span></button>
   </div>
 
   <div class="history">
@@ -76,7 +88,24 @@
   </div>
 </section>
 
+<!-- 全螢幕警報 -->
+<div id="alertOverlay" class="alert-overlay hidden" role="alertdialog" aria-live="assertive">
+  <div class="alert-box">
+    <div class="alert-icon">🚨</div>
+    <h2>緊急警報</h2>
+    <p id="alertWho" class="alert-who"></p>
+    <p id="alertWhere" class="alert-where"></p>
+    <p id="alertWhen" class="muted"></p>
+    <div class="alert-actions">
+      <a id="alertMapLink" class="alert-btn" target="_blank" rel="noopener">在地圖上查看</a>
+      <button id="alertAck" class="alert-btn">知道了（關閉警示音）</button>
+      <button id="alertResolve" class="alert-btn danger hidden">解除警報</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
+<script src="/vendor/leaflet/leaflet.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

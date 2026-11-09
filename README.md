@@ -1,93 +1,107 @@
-# 一鍵對講 PTT 原型（第一階段・網頁版）
+# 一鍵對講 PTT 原型（第二階段・網頁版）
 
-**線上測試網址：https://ptt-prototype.onrender.com**（Render 免費方案，新加坡機房）
-
+**線上測試網址：https://ptt-prototype.onrender.com**　·　**管理後台：https://ptt-prototype.onrender.com/admin**
+（Render 免費方案，新加坡機房）
 
 對標 Zello 的 Push-to-Talk 網頁原型，行動裝置優先、可加到主畫面（PWA），介面為繁體中文。
+**語音只做即時轉發、不保存錄音**（伺服器不寫磁碟、不留在記憶體）。
 
 ## 功能
-1. **暱稱登入**：輸入暱稱即可使用；瀏覽器會記住一組隨機 ID（localStorage），重新整理或重連後身分不變。沒有密碼。
-2. **頻道**：預設「大廳」，可建立新頻道、切換頻道，看到頻道內線上成員與人數。
-3. **按住講話**：大按鈕支援觸控按住、滑鼠按住，電腦上也可按住**空白鍵**。按住時錄音並每約 100ms 串流一包給同頻道線上成員即時播放。
-4. **伺服器端發言權（floor control）**：每個頻道／私訊同時只允許一人講話；其他人按下會看到「某某正在說話」。講話者放開、斷線、或超過 60 秒時，伺服器自動釋放發言權。
-5. **不保存錄音（降低伺服器負擔）**：伺服器只做即時轉發，語音不寫入磁碟、也不留在記憶體；講完就沒有了，沒有歷史清單、回放或離線留言。畫面只保留「最近說話：誰 · 幾點 · 幾秒」與本次開啟期間的文字動態（純文字，不含音訊）。
-6. **一對一私人對講**：在「成員」分頁點一個人即進入私人對講；「私訊」分頁列出最近私人對講過的人。因為不留言，對方不在線時無法發話（會提示「目前不在線」）。
-7. **相容性與連線**：iOS Safari AudioContext 在使用者手勢中解鎖、`navigator.audioSession`（iOS 17+）設定；連線狀態燈號、指數退避自動重連、心跳偵測半開連線。
+### 第一階段（維持）
+- 頻道對講、線上成員、按住講話（觸控／滑鼠／電腦空白鍵），約 100ms 一包即時串流。
+- 伺服器端 floor control：同一頻道／私訊同時只有一人能講；放開、斷線、斷流 3 秒或超過 60 秒自動釋放。
+- 一對一私人對講（點成員）；對方不在線時無法發話（沒有留言）。
+- 「最近說話：誰 · 幾點 · 幾秒」純文字狀態；iOS 音訊解鎖、連線燈號、自動重連。
+
+### 第二階段（新增）
+1. **帳號登入與管理後台**
+   - 帳號＋密碼登入；密碼用 **scrypt**（Node 內建 `crypto.scryptSync`，N=16384，隨機 salt）雜湊保存。
+   - 登入後拿到隨機 token（30 天），伺服器只存 token 的 SHA-256。WebSocket 與 API 都要帶 token；未登入一律拒絕。登入錯誤 10 次鎖 10 分鐘。
+   - 角色：**管理員**／一般使用者。後台 `/admin` 可：建立使用者（可自動產生密碼，只顯示一次）、改名、重設密碼（舊登入立即失效）、停用／啟用（立即踢下線）、刪除、設為管理員；建立／刪除頻道（大廳不可刪）、設定開放／封閉、指派成員與頻道角色；查看與解除警報。
+   - 頻道與私人對講都以**帳號身分**檢查權限：封閉頻道只有被指派的人（與管理員）看得到、進得去；權限被拿掉時會立即被移回大廳。
+   - 第一個管理員由環境變數 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 建立；之後若環境變數的密碼改了，重啟時會以環境變數為準（忘記密碼時的救援方式）。
+2. **即時位置地圖與電量**
+   - 「地圖」分頁，打開「分享我的位置與電量」開關並同意瀏覽器定位權限後才會回報（每 30 秒一次＋移動時，最快 15 秒一次）。
+   - 電量用 Battery Status API：Android Chrome／桌面 Chrome 可用；**iOS Safari 不支援，顯示「不明」**。
+   - 地圖用 **Leaflet 1.9.4（放在本 repo `public/vendor/leaflet`，BSD-2 授權）＋ OpenStreetMap 圖磚**，右下角標示「© OpenStreetMap 貢獻者」。只在使用者打開地圖時載入圖磚，不預先下載、不大量抓取，符合 [OSM 圖磚使用政策](https://operations.osmfoundation.org/policies/tiles/)；若之後使用量變大應改用付費圖磚服務或自架。
+   - 伺服器**只在記憶體保留每人最新一筆位置**（不做軌跡、不存歷史、不寫資料庫），重啟即消失；關掉開關會立即刪除。
+   - 可見範圍：管理員看全體；一般成員只看**目前在同一頻道**的人。
+3. **頻道角色與優先搶話**
+   - 角色：**主管**（可講、優先權 3）、**一般**（可講、優先權 2）、**只聽**（不能按講）。開放頻道未指派的人＝一般；管理員未被指派時＝主管。
+   - 伺服器端判斷：優先權較高者按下可**中斷**較低者，被中斷者畫面提示「你的發話被 ○○ 中斷」；同等或較低者按下會看到「○○ 正在說話」。
+4. **緊急警報**
+   - 紅色按鈕需**長按 2 秒**才會送出（放開取消，防誤觸）。
+   - 廣播給**所有在線管理員＋同頻道成員**：全螢幕閃爍警示、警示音（Web Audio 產生）、震動、發送者姓名、頻道、當下位置與 OpenStreetMap 地圖連結（無定位時顯示「不明」）。
+   - 警報期間發送者取得**最高發話權（優先權 100）**，連「只聽」角色也能講，並可中斷主管。
+   - 管理員可在對講畫面或後台**解除警報**；發送者也可以自行取消。警報只存在記憶體，不保存錄音。
 
 ## 架構
 ```
-手機瀏覽器 ──WebSocket(/ws)──▶ Node.js 伺服器 ──▶ 同頻道/私訊的其他線上成員
-   │  JSON：hello / join / ptt_start / ptt_stop …        │
-   │  二進位：16kHz 16-bit 單聲道 PCM（每包約 100ms）    ├─ floor control（記憶體中，每個對話一把鎖）
-   │                                                    ├─ 只計算長度（判斷斷流），不保留任何音訊
-   └──HTTP：/api/health、靜態檔                          └─ data/db.json  只存頻道清單
+手機瀏覽器 ──WebSocket /ws（hello 帶 token）──▶ Node.js 伺服器 ──▶ 同頻道／私訊的線上成員
+   │  JSON：join / ptt_start / ptt_stop / loc / alert_start / alert_resolve …
+   │  二進位：16kHz 16-bit PCM（每包約 100ms），伺服器加 streamId 後轉發即丟棄
+   └──HTTP：/api/login、/api/me、/api/locations、/api/alerts、/api/admin/*、靜態檔
+記憶體：線上狀態、floor、最近說話者、位置（最新一筆）、警報
+資料庫：帳號（雜湊密碼）、頻道、成員角色、登入 session —— 沒有任何音訊／位置／警報
 ```
-- **伺服器轉發**（不是 P2P）：跟 Zello 一樣，所有語音都經過伺服器，伺服器才能做發言權控制。這一版依需求**不錄存**，伺服器收到一包就轉發一包，轉完即丟棄。`/api/history`、`/audio/*` 一律回 404。
-- 伺服器轉發時在每包前面加 4-byte streamId，接收端依 streamId 排程播放（約 180ms 抖動緩衝）。
-- 依賴只有 `ws` 一個套件；前端是純 HTML/CSS/JS，無建置步驟。
+- 持久化（`lib/store.js`）：有 `DATABASE_URL` 時用 **Postgres**（一張表 `ptt_state`，整份狀態存成一列 JSONB）；沒有時用 `data/db.json`（本機開發用）。
+- 依賴：`ws`、`pg`；前端純 HTML/CSS/JS，Leaflet 放在 `public/vendor`。
 
-### 為什麼目前用 PCM 而不是 Opus？
-設計規劃寫的是 Opus。實作時發現瀏覽器的 MediaRecorder 在 iOS Safari 只能錄 `audio/mp4`(AAC)，Chrome 錄 `webm/opus`，兩邊格式不同，且 webm 分段不能單獨解碼、iPhone 上 MediaSource 支援也不完整，近即時播放會很不穩。所以原型先用「Web Audio 擷取 → 16kHz PCM → WebSocket」，所有瀏覽器都能即時播放，代價是頻寬約 32 KB/s（Opus 約 2–3 KB/s）。下一步可改用 WebCodecs `AudioEncoder`（Opus）或做成原生 App 時直接用 Opus。
+## 雲端部署（Render）與持久化
+| 資源 | 方案 | 說明 |
+|---|---|---|
+| Web Service `ptt-prototype` | free | Node，`npm ci` / `node server.js`，健康檢查 `/api/health` |
+| Postgres `ptt-prototype-db` | free | 存帳號、頻道、角色、session |
+
+環境變數：`ADMIN_USERNAME`、`ADMIN_PASSWORD`（不放在 repo）、`DATABASE_URL`（由 `render.yaml` 的 `fromDatabase` 帶入）。
+
+### 免費方案限制（重要）
+- **Free Postgres 30 天後到期**：本資料庫建立於 2026-11-10，**2026-12-10 00:48（台北時間）到期**；到期後有 14 天寬限期可升級成付費方案，之後 Render 會**刪除資料庫與所有資料**。Free Postgres 也**沒有備份**，Render 可能隨時維護重啟；每個 workspace 只能有一個 free Postgres，容量 1 GB。
+  - 到期前若要繼續免費使用：建新的 free Postgres、把 `ptt_state` 那一列匯出再匯入（或重新建立帳號），並更新 `DATABASE_URL`。
+  - 如果資料庫不可用或沒設 `DATABASE_URL`，伺服器會改用容器內的 `data/db.json`：**重新部署、重啟或休眠後帳號與頻道都會消失**，只剩環境變數建立的管理員與「大廳」。
+- **Web Service 閒置 15 分鐘會休眠**，下一個人打開要等約 1 分鐘喚醒；每月 750 免費小時、頻寬有上限。
+- 本 repo 推送到 GitHub 後 **Render 不會自動部署**（Render 帳號沒有連結 GitHub），需在 Render 後台或用 API 手動部署。
 
 ## 檔案
 | 路徑 | 說明 |
 |---|---|
-| `server.js` | HTTP + WebSocket 伺服器、floor control、存檔、API |
-| `public/index.html` `app.js` `style.css` | 前端（PWA） |
-| `public/manifest.webmanifest` `sw.js` `icon*` | PWA 安裝用 |
-| `run.sh` | 常駐腳本，伺服器當掉自動重啟 |
-| `test/e2e.js` | 協定層端對端測試（模擬 3 個客戶端） |
-| `test/browser_e2e.py` | 真實瀏覽器測試（Chromium + 假麥克風，兩個工作階段） |
-| `data/` | 執行時產生，只有 `db.json`（頻道清單），沒有任何音訊 |
-
-## 雲端部署（Render）
-- 服務：`ptt-prototype`（Web Service，Node，free 方案，region singapore），從本 repo 的 `main` 分支自動部署：push 到 main 就會重新部署。
-- Build：`npm ci`；Start：`node server.js`；伺服器讀 `process.env.PORT`；健康檢查 `GET /api/health`。
-- WebSocket 走同一個網址的 `wss://ptt-prototype.onrender.com/ws`。
-
-### Render 免費方案的限制
-- **閒置休眠**：約 15 分鐘沒有流量會休眠，下一個人打開時要等約 30–60 秒喚醒（畫面會顯示「重新連線中」，之後自動連上）。
-- **磁碟不持久**：`data/db.json`（頻道清單）存在容器本機磁碟，**每次重新部署、重啟或休眠後都會清空**，自建的頻道會消失（只剩「大廳」）。語音本來就不保存，所以沒有錄音會遺失的問題。
-- 免費方案有每月執行時數與頻寬上限；只適合小規模測試。
+| `server.js` | HTTP + WebSocket、floor control（優先權）、位置、警報、後台 API |
+| `lib/store.js` / `lib/auth.js` | 持久化（Postgres / JSON）、密碼雜湊與 token |
+| `public/index.html` `app.js` `style.css` | 對講 App（PWA） |
+| `public/admin.html` `admin.js` `admin.css` | 管理後台 |
+| `public/vendor/leaflet/` | Leaflet 1.9.4 |
+| `render.yaml` | Render Blueprint（web service + free Postgres） |
+| `test/e2e.js` | 協定層測試（多帳號；登入、後台、權限、優先搶話、位置、警報、不保存錄音） |
+| `test/browser_e2e.py` | 真實瀏覽器測試（Chromium + 假麥克風 + 模擬定位） |
 
 ## 本機啟動
 ```bash
-cd /workspace/ptt-prototype
-npm install            # 只有 ws
-nohup ./run.sh > server.log 2>&1 &    # 預設埠 8800，可用 PORT=xxxx 改
-curl localhost:8800/api/health
+npm install
+ADMIN_USERNAME=admin ADMIN_PASSWORD='至少8字元的密碼' node server.js      # 預設埠 8800，資料存 data/db.json
+# 要用 Postgres：再加 DATABASE_URL=postgres://...
 ```
-麥克風必須在 **HTTPS**（或 localhost）下才能用，所以手機測試需要一個 HTTPS 網址，例如：
-```bash
-cloudflared tunnel --url http://localhost:8800     # 印出 https://xxxx.trycloudflare.com
-```
-> 開發用的 box 對外網路會擋 cloudflared（7844 埠）與 SSH 類 tunnel，所以改用 Render 部署取得公開網址。
-
-### 在自己電腦上跑（最快的手機測試方式）
-1. 裝 Node.js 18+，把整個資料夾複製過去，`npm install`，`node server.js`。
-2. 安裝 cloudflared，執行 `cloudflared tunnel --url http://localhost:8800`，把印出的 https 網址用手機打開。
+麥克風與定位都需要 **HTTPS**（或 localhost）。
 
 ### 測試
 ```bash
-node test/e2e.js http://localhost:8800     # 本機會另外檢查 data/ 只有 db.json
-python3 test/browser_e2e.py http://localhost:8800
+ADMIN_USERNAME=admin ADMIN_PASSWORD=... node test/e2e.js http://localhost:8800 --data-dir=./data
+ADMIN_USERNAME=admin ADMIN_PASSWORD=... python3 test/browser_e2e.py http://localhost:8800
 ```
+測試會自己建立 `t_` 開頭的帳號與頻道，結束時刪除。
 
-## 建議測試方式
-- 兩支手機（或手機 + 電腦）打開同一個 https 網址，各輸入不同暱稱。
-- 都會自動進到「大廳」。A 按住講話，B 應聽到並看到「A 正在說話」；B 此時按下會被擋。
-- 讓 B 關掉頁面，A 講幾句，B 再打開 → 聽不到剛才的內容（不保存），只會看到頻道的「最近：A 幾點」。
-- 在「成員」點對方 → 私人對講。
-- iPhone：第一次要點畫面一下啟用聲音；建議關掉靜音鍵測試。
+## 建議測試方式（兩支手機或手機＋電腦）
+1. 電腦打開 `/admin`，用管理員登入，建立 2–3 個使用者（密碼可留空自動產生），建立一個頻道並指派角色（例如 A＝主管、B＝一般、C＝只聽）。
+2. 手機各自用帳號登入對講頁，切到該頻道：B 按住講話時 C 只能聽；A 按下會中斷 B，B 畫面會提示。
+3. 「地圖」分頁打開分享開關並允許定位：彼此看得到位置、電量（iPhone 顯示「不明」）、更新時間。
+4. 長按紅色「緊急警報」2 秒：同頻道與管理員畫面出現全螢幕警示與警示音；在後台或對講頁用管理員解除。
+5. iPhone：第一次要點畫面一下啟用聲音；建議關掉靜音鍵。
 
 ## 已知限制
-- **雲端免費方案**：會休眠、重啟後資料清空（見上方「Render 免費方案的限制」）。
-- **沒有真正的帳號系統**：暱稱可重複，ID 存在瀏覽器裡，清除瀏覽資料就變新身分；私訊權限只靠 ID，不安全，只適合測試。
-- **背景/鎖屏收不到**：網頁在 iOS 鎖屏或切到背景後 WebSocket 會被暫停，收不到即時對講（也沒有留言可補聽）。要像 Zello 一樣鎖屏也能收，必須做原生 App 並使用 Apple **PushToTalk framework**；Android 也要前景服務（foreground service）。
-- **iOS 音訊**：麥克風開著時 iPhone 可能改走聽筒、音量變小；Web Audio 可能受靜音鍵影響（iOS 17+ 已用 `audioSession` 嘗試處理）。這些尚未在實機 iPhone 驗證。
-- **頻寬**：PCM 約 32 KB/s，弱網路下會斷續；尚未做 Opus 壓縮與丟包補償。
-- **按下到開始收音**：第一次按下要等麥克風啟動，開頭約 0.1–0.5 秒可能被切掉；放開後麥克風會保留 20 秒，連續對講較順。最後不足 100ms 的尾音會被捨棄。
-- **擴充性**：單一 Node 程序、資料存 JSON，適合幾十人測試，不適合正式上線。
-- 單次發話上限 60 秒。
-- **沒有留言**：不在線、切到背景或網路斷掉時講的話會直接錯過，事後無法補聽。若之後需要「離線留言」，要再加回伺服器儲存（會增加伺服器負擔與儲存成本）。
-- 發話中超過 3 秒沒收到語音（例如手機斷網），伺服器會自動收回發言權，避免頻道被卡住；剛按下時（等麥克風權限）給 10 秒。
+- **背景／鎖屏收不到、也不會回報位置**：網頁在 iOS 鎖屏或切到背景後 WebSocket 與定位都會暫停。要像 Zello 一樣，必須做原生 App（iOS PushToTalk framework、Android 前景服務）。
+- **沒有留言**：不在線或斷線時講的話會直接錯過。
+- **位置與警報只在記憶體**：伺服器重啟／休眠後消失；警報期間若伺服器重啟，警報會遺失，需重新發出。
+- 警示音由網頁播放，手機靜音／鎖屏時可能聽不到；iOS 不支援震動。
+- iOS 音訊：麥克風開著時可能走聽筒、音量變小；尚未在實機 iPhone 驗證。
+- 頻寬：PCM 約 32 KB/s，尚未做 Opus 壓縮。
+- 單一 Node 程序；整份狀態存成一列 JSONB，適合幾十～幾百個帳號的測試規模，不適合正式上線。
+- 沒有雙因素驗證、沒有密碼找回信；token 存在瀏覽器 localStorage。

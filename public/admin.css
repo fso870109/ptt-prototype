@@ -1,0 +1,22 @@
+body{overflow:auto}
+.admin{max-width:960px;margin:0 auto;padding-bottom:40px}
+.card{background:#111c33;border:1px solid #1e293b;border-radius:14px;margin:12px;padding:14px}
+.card h2{margin:0 0 10px;font-size:18px}
+.card input,.card select{width:100%;font-size:15px;padding:10px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#f1f5f9;margin-bottom:8px}
+.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;align-items:start}
+.grid-form input,.grid-form select{margin:0}
+.grid-form .primary{margin:0}
+.chk{display:flex;align-items:center;gap:6px;font-size:14px}.chk input{width:auto;margin:0}
+.tbl{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
+.tbl th,.tbl td{text-align:left;padding:8px 6px;border-bottom:1px solid #1e293b;vertical-align:middle}
+.tbl button,.ch-card button{font-size:13px;padding:6px 10px;margin:2px}
+.tbl .danger,.ch-card .danger{background:#7f1d1d}
+.notice{background:#14532d;padding:10px;border-radius:10px;font-size:14px;word-break:break-all}
+.ch-card{border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:10px}
+.ch-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
+.ch-members{list-style:none;padding:0;margin:8px 0}
+.ch-members li{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px dashed #1e293b;gap:6px}
+.ch-members select,.ch-add select{width:auto;margin:0;padding:6px}
+.ch-add{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.tag{font-size:12px;padding:2px 8px;border-radius:10px;background:#334155}
+.tag.on{background:#166534}.tag.off{background:#7f1d1d}.tag.admin{background:#7c3aed}
