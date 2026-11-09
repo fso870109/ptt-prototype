@@ -35,7 +35,7 @@
   <nav class="tabs">
     <button data-tab="channels" class="active">頻道</button>
     <button data-tab="members">成員</button>
-    <button data-tab="dms">私訊 <span id="dmBadge" class="badge hidden"></span></button>
+    <button data-tab="dms">私訊</button>
   </nav>
 
   <div class="panel" id="tab-channels">
@@ -70,16 +70,13 @@
   </div>
 
   <div class="history">
-    <div class="history-head">
-      <strong>語音紀錄</strong>
-      <button id="playUnread" class="small-btn hidden">▶ 播放未聽 (<span id="unreadCount">0</span>)</button>
-    </div>
-    <ul id="historyList" class="hist"></ul>
+    <div class="history-head"><strong>最近動態</strong><span class="muted small">只即時播放，不保存錄音</span></div>
+    <div id="lastTalk" class="last-talk">這裡還沒有人說話</div>
+    <ul id="activityList" class="hist"></ul>
   </div>
 </section>
 
 <div id="toast" class="toast hidden"></div>
-<audio id="player" preload="none" playsinline></audio>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -6,7 +6,7 @@ res = []
 def ok(n, c, x=''): res.append(c); print('PASS' if c else 'FAIL', n, x)
 with sync_playwright() as p:
     b = p.chromium.launch(args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'])
-    pages, bins = [], {}
+    pages, bins, reqs = [], {}, []
     for name in ['小明', '小華']:
         ctx = b.new_context(permissions=['microphone'], viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True)
         pg = ctx.new_page(); bins[name] = {'in': 0, 'out': 0}
@@ -14,6 +14,7 @@ with sync_playwright() as p:
             ws.on('framereceived', lambda f: bins[name].__setitem__('in', bins[name]['in'] + (0 if isinstance(f, str) else 1)))
             ws.on('framesent', lambda f: bins[name].__setitem__('out', bins[name]['out'] + (0 if isinstance(f, str) else 1)))
         pg.on('websocket', onws)
+        pg.on('request', lambda r: reqs.append(r.url))
         pg.goto(BASE); pg.fill('#nick', name); pg.click('#enter')
         pg.wait_for_selector('#connText:has-text("已連線")', timeout=10000)
         pages.append(pg)
@@ -40,12 +41,10 @@ with sync_playwright() as p:
     ok('B 的瀏覽器即時收到語音封包', bins['小華']['in'] >= 15, f"{bins['小華']['in']} 包")
     live = B.evaluate("({state: actx && actx.state, t: actx && actx.currentTime})")
     ok('B 的 AudioContext 為 running（可播放）', live['state'] == 'running', json.dumps(live))
-    B.wait_for_selector('#historyList li[data-id]', timeout=5000)
-    h = B.inner_text('#historyList li[data-id]')
-    ok('B 的語音紀錄出現小明的留言', '小明' in h, h.replace('\n', ' '))
-    B.click('#historyList button[data-play]'); time.sleep(1.0)
-    pl = B.evaluate("({paused: player.paused, t: player.currentTime, dur: player.duration, err: player.error && player.error.code})")
-    ok('B 點「播放」可回放歷史語音', (pl['t'] > 0.3 and not pl['err']), json.dumps(pl))
+    lt = B.inner_text('#lastTalk'); act = B.inner_text('#activityList')
+    ok('B 顯示「最近說話：小明」純文字狀態', '最近說話：小明' in lt and '小明' in act, lt)
+    noui = B.evaluate("!document.querySelector('#historyList') && !document.querySelector('#playUnread') && !document.querySelector('audio') && !document.querySelector('[data-play]')")
+    ok('畫面上沒有歷史清單、回放、「播放未聽」', noui)
     # 私人對講：A 點小華
     A.click('#memberList li[data-name="小華"]')
     lbl = A.inner_text('#targetLabel'); ok('A 點成員進入私人對講', '私人對講：小華' in lbl, lbl)
@@ -57,6 +56,8 @@ with sync_playwright() as p:
     off = A.inner_text('#connText'); A.context.set_offline(False)
     A.wait_for_selector('#connText:has-text("已連線")', timeout=20000)
     ok('斷線顯示狀態並自動重連', ('斷線' in off or '重新連線' in off), off)
+    bad = [u for u in reqs if '/audio/' in u or '/api/history' in u or u.endswith('.wav')]
+    ok('整個過程瀏覽器沒有向伺服器要任何錄音或歷史', not bad, f'{len(reqs)} 個請求，可疑 {len(bad)} 個')
     A.screenshot(path='test/screenshot_A.png'); B.screenshot(path='test/screenshot_B.png')
     b.close()
 print(f"\n{sum(res)}/{len(res)} 通過"); sys.exit(0 if all(res) else 1)

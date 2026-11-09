@@ -54,3 +54,5 @@ button.link{background:none;color:#38bdf8;padding:4px 6px}
 .hist button{padding:8px 12px;font-size:14px}
 .hist li.playing{background:#1e3a5f;border-radius:8px}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1e293b;border:1px solid #334155;padding:10px 16px;border-radius:10px;font-size:14px;z-index:9;max-width:90%}
+.last-talk{font-size:14px;color:#cbd5e1;padding:6px 2px 8px;border-bottom:1px solid #1e293b}
+.hist li{justify-content:space-between}

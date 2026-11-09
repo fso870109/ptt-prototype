@@ -3,3 +3,4 @@ data/
 *.log
 *.pid
 test/*.png
+__pycache__/

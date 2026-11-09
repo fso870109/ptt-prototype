@@ -1,23 +1,22 @@
 'use strict';
 // ====== 一鍵對講 PTT 原型（前端）======
 // 語音格式：16kHz / 16-bit / 單聲道 PCM，每 ~100ms 一包，透過 WebSocket 二進位訊框傳送。
+// 語音只即時播放，不錄存：伺服器與瀏覽器都不保留任何音訊。
 const $ = (s) => document.querySelector(s);
 const SR = 16000;
 const store = {
   get id() { let v = localStorage.getItem('ptt_id'); if (!v) { v = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36)).replace(/[^0-9a-zA-Z_-]/g, ''); localStorage.setItem('ptt_id', v); } return v; },
   get name() { return localStorage.getItem('ptt_name') || ''; }, set name(v) { localStorage.setItem('ptt_name', v); },
   get channel() { return localStorage.getItem('ptt_channel') || ''; }, set channel(v) { localStorage.setItem('ptt_channel', v); },
-  heard() { try { return JSON.parse(localStorage.getItem('ptt_heard') || '{}'); } catch { return {}; } },
-  markHeard(id) { const h = this.heard(); h[id] = 1; const keys = Object.keys(h); if (keys.length > 3000) keys.slice(0, 1000).forEach(k => delete h[k]); localStorage.setItem('ptt_heard', JSON.stringify(h)); },
-  seen(conv) { try { return (JSON.parse(localStorage.getItem('ptt_seen') || '{}'))[conv] || 0; } catch { return 0; } },
-  setSeen(conv, ts) { let o = {}; try { o = JSON.parse(localStorage.getItem('ptt_seen') || '{}'); } catch {} if ((o[conv] || 0) < ts) { o[conv] = ts; localStorage.setItem('ptt_seen', JSON.stringify(o)); } },
 };
 
 const S = {
   ws: null, connected: false, retry: 0, myId: store.id, myName: '',
   channels: [], channel: '', members: [], online: [], dms: [],
   target: null,           // {type:'channel', id, name} | {type:'dm', peerId, peerName, conv}
-  history: [], liveStreams: new Map(), // streamId -> {nextTime, from, conv, gotAudio}
+  log: [], liveStreams: new Map(),        // log：本次開啟期間的「誰說過話」純文字紀錄
+  lastTalk: {},                           // conv -> {fromName, ts, durMs}（伺服器提供的最近說話者）
+  // streamId -> {nextTime, from, conv, gotAudio}
   activeTalks: new Map(),  // conv -> {from, fromName, streamId}
   pressing: false, granted: false, streamId: 0, pending: [], pendingConv: '',
 };
@@ -38,8 +37,6 @@ function unlockAudio() {
   const b = c.createBuffer(1, 1, c.sampleRate); const s = c.createBufferSource(); s.buffer = b; s.connect(c.destination); s.start(0);
   // iOS 17+：讓 Web Audio 不受靜音鍵影響（不支援的瀏覽器會忽略）
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
-  // 解鎖 <audio>（歷史回放用）
-  const p = $('#player'); if (!p.dataset.unlocked) { p.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='; p.play().then(() => p.pause()).catch(() => {}); p.dataset.unlocked = '1'; }
 }
 ['touchstart', 'pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, () => { if (actx && actx.state !== 'running') actx.resume().catch(() => {}); }, { passive: true }));
 
@@ -194,7 +191,7 @@ S.lastPong = Date.now();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     if (!S.ws || S.ws.readyState > 1) { S.retry = 0; connect(); }
-    else if (S.target) loadHistory();
+    else renderActivity();
   }
 });
 window.addEventListener('online', () => { if (!S.ws || S.ws.readyState > 1) { S.retry = 0; connect(); } });
@@ -208,7 +205,7 @@ function handle(m) {
       { const want = S.channel || store.channel || 'lobby';
         const ok = S.channels.some(c => c.id === want) ? want : 'lobby';
         wsSend({ t: 'join', channel: ok }); }
-      if (S.target) loadHistory();
+      renderActivity();
       break;
     case 'pong': S.lastPong = Date.now(); break;
     case 'channels': S.channels = m.channels; renderChannels(); break;
@@ -217,7 +214,7 @@ function handle(m) {
       const changed = S.channel !== m.channel;
       S.channel = m.channel; store.channel = m.channel;
       const c = S.channels.find(x => x.id === m.channel);
-      if (changed || !S.target || S.target.type === 'channel') { S.target = { type: 'channel', id: m.channel, name: c ? c.name : m.channel }; renderTarget(); loadHistory(); }
+      if (changed || !S.target || S.target.type === 'channel') { S.target = { type: 'channel', id: m.channel, name: c ? c.name : m.channel }; renderTarget(); renderActivity(); }
       renderChannels();
       break;
     }
@@ -232,7 +229,7 @@ function handle(m) {
       break;
     case 'floor_denied':
       if (m.reason === 'busy') { const was = S.pressing; S.pressing = false; S.pending = []; btn.classList.remove('pressing', 'talking'); releaseMicLater(); if (was) flashBusy(m.byName); }
-      else { pttUp(); toast('無法發話：' + (m.reason === 'no_access' ? '請先加入頻道' : m.reason)); }
+      else { pttUp(); toast(m.reason === 'offline' ? `${m.byName || '對方'} 目前不在線（不保存錄音，無法留言）` : '無法發話：' + (m.reason === 'no_access' ? '請先加入頻道' : m.reason)); }
       break;
     case 'floor_revoked': pttUp(); toast(m.reason === 'stalled' ? '網路不穩，語音中斷，已結束發話' : '已達單次發話上限 60 秒'); break;
     case 'talk_start':
@@ -244,16 +241,16 @@ function handle(m) {
     case 'talk_end': {
       const a = S.activeTalks.get(m.conv); if (a && a.streamId === m.streamId) S.activeTalks.delete(m.conv);
       const st = S.liveStreams.get(m.streamId); S.liveStreams.delete(m.streamId);
-      if (m.message) {
-        if (m.message.from === S.myId || (st && st.gotAudio)) store.markHeard(m.message.id); // 即時聽過了
-        if (m.conv.startsWith('dm:')) upsertDm(m.message);
-        if (S.target && (S.target.type === 'dm' ? S.target.conv : S.target.id) === m.conv) { S.history.push(m.message); renderHistory(); }
-        else if (m.conv.startsWith('dm:')) renderDms();
+      if (m.lastTalk) {
+        S.lastTalk[m.conv] = m.lastTalk;
+        S.log.push({ conv: m.conv, ...m.lastTalk }); if (S.log.length > 200) S.log.shift();
+        if (m.conv.startsWith('dm:')) upsertDm(m.conv, m.lastTalk);
+        if (m.conv === currentConv()) renderActivity();
       }
       updateTalkStatus();
       break;
     }
-    case 'channel_activity': { const c = S.channels.find(x => x.id === m.channel); if (c) { c.last = m.last; renderChannels(); } break; }
+    case 'channel_activity': { const c = S.channels.find(x => x.id === m.channel); if (c) { c.last = m.last; c.lastTalk = m.lastTalk; renderChannels(); } break; }
     case 'error': toast(m.msg); break;
   }
 }
@@ -284,8 +281,9 @@ function renderTarget() {
 }
 function renderChannels() {
   $('#channelList').innerHTML = S.channels.map(c => {
-    const unread = c.last && c.last > store.seen(c.id) && c.id !== S.channel;
-    return `<li data-ch="${esc(c.id)}" class="${c.id === S.channel ? 'active' : ''}"><span># ${esc(c.name)}${unread ? '<span class="newdot"></span>' : ''}</span><span class="meta">${c.online} 人在線</span></li>`;
+    if (c.lastTalk) S.lastTalk[c.id] = c.lastTalk;
+    const lt = c.lastTalk ? ` · 最近：${esc(c.lastTalk.fromName)} ${fmtTime(c.lastTalk.ts)}` : '';
+    return `<li data-ch="${esc(c.id)}" class="${c.id === S.channel ? 'active' : ''}"><span># ${esc(c.name)}</span><span class="meta">${c.online} 人在線${lt}</span></li>`;
   }).join('');
   const c = S.channels.find(x => x.id === S.channel); if (c && S.target && S.target.type === 'channel' && S.target.name !== c.name) { S.target.name = c.name; renderTarget(); }
 }
@@ -297,83 +295,46 @@ function renderOthers() {
   const others = S.online.filter(u => !ids.has(u.id) && u.id !== S.myId);
   $('#otherList').innerHTML = others.map(u => { const c = S.channels.find(x => x.id === u.channel); return `<li data-uid="${esc(u.id)}" data-name="${esc(u.name)}"><span>🟢 ${esc(u.name)}</span><span class="meta">${c ? '#' + esc(c.name) : ''} · 私人對講 ›</span></li>`; }).join('') || '<li class="muted">（沒有）</li>';
 }
-function upsertDm(msg) {
-  const peerId = msg.conv.slice(3).split(':').find(x => x !== S.myId) || S.myId;
-  let d = S.dms.find(x => x.conv === msg.conv);
-  const peerName = msg.from === peerId ? msg.fromName : (msg.toName || d?.peerName || '對方');
-  if (!d) { d = { conv: msg.conv, peerId, peerName, last: msg.ts }; S.dms.push(d); }
-  d.last = Math.max(d.last, msg.ts); if (msg.from === peerId) d.peerName = msg.fromName;
+function upsertDm(conv, lt) {
+  const peerId = conv.slice(3).split(':').find(x => x !== S.myId) || S.myId;
+  let d = S.dms.find(x => x.conv === conv);
+  const peerName = lt.from === peerId ? lt.fromName : (lt.toName || d?.peerName || '對方');
+  if (!d) { d = { conv, peerId, peerName, last: lt.ts }; S.dms.push(d); }
+  d.last = Math.max(d.last, lt.ts); d.peerName = peerName;
   renderDms();
 }
 function renderDms() {
   S.dms.sort((a, b) => b.last - a.last);
-  let unreadN = 0;
   $('#dmList').innerHTML = S.dms.map(d => {
-    const unread = d.last > store.seen(d.conv) && currentConv() !== d.conv; if (unread) unreadN++;
-    return `<li data-uid="${esc(d.peerId)}" data-name="${esc(d.peerName)}"><span>🔒 ${esc(d.peerName)}${unread ? '<span class="newdot"></span>' : ''}</span><span class="meta">${fmtTime(d.last)}</span></li>`;
+    if (d.lastTalk) S.lastTalk[d.conv] = d.lastTalk;
+    return `<li data-uid="${esc(d.peerId)}" data-name="${esc(d.peerName)}"><span>🔒 ${esc(d.peerName)}</span><span class="meta">最近 ${fmtTime(d.last)}</span></li>`;
   }).join('') || '<li class="muted">還沒有私人對講。到「成員」點一個人即可開始。</li>';
-  $('#dmBadge').textContent = unreadN; $('#dmBadge').classList.toggle('hidden', !unreadN);
 }
 function openDm(peerId, peerName) {
   if (peerId === S.myId) return;
   const conv = 'dm:' + [S.myId, peerId].sort().join(':');
-  S.target = { type: 'dm', peerId, peerName, conv }; renderTarget(); loadHistory(); renderDms();
+  S.target = { type: 'dm', peerId, peerName, conv }; renderTarget(); renderActivity(); renderDms();
 }
 
-async function loadHistory() {
-  const conv = currentConv(); if (!conv) return;
-  try {
-    const r = await fetch(`/api/history?conv=${encodeURIComponent(conv)}&user=${encodeURIComponent(S.myId)}`, { cache: 'no-store' });
-    if (!r.ok) throw new Error(r.status);
-    const list = await r.json();
-    if (conv !== currentConv()) return;
-    S.history = list; renderHistory();
-  } catch (e) { toast('讀取紀錄失敗'); }
+// ---------- 最近說話（純文字，不含音訊）----------
+function renderActivity() {
+  const conv = currentConv();
+  const lt = S.lastTalk[conv];
+  $('#lastTalk').textContent = lt ? `最近說話：${lt.from === S.myId ? '我' : lt.fromName} · ${fmtTime(lt.ts)} · ${(lt.durMs / 1000).toFixed(1)} 秒` : '這裡還沒有人說話';
+  const items = S.log.filter(x => x.conv === conv).slice(-30).reverse();
+  $('#activityList').innerHTML = items.map(x => `<li class="${x.from === S.myId ? 'mine' : ''}"><span class="who">${esc(x.from === S.myId ? '我' : x.fromName)}</span><span class="when">${fmtTime(x.ts)} · ${(x.durMs / 1000).toFixed(1)} 秒</span></li>`).join('') || '<li class="muted">本次開啟後還沒有對講</li>';
 }
-function renderHistory() {
-  const heard = store.heard(); const conv = currentConv();
-  const items = S.history.slice(-100);
-  let unread = 0;
-  $('#historyList').innerHTML = items.slice().reverse().map(m => {
-    const mine = m.from === S.myId; const un = !mine && !heard[m.id]; if (un) unread++;
-    return `<li data-id="${m.id}" class="${un ? 'unread' : ''} ${mine ? 'mine' : ''}"><div class="info"><div class="who">${esc(mine ? '我' : m.fromName)}</div><div class="when">${fmtTime(m.ts)} · ${(m.durMs / 1000).toFixed(1)} 秒</div></div><button data-play="${m.id}">▶ 播放</button></li>`;
-  }).join('') || '<li class="muted">還沒有語音紀錄</li>';
-  $('#unreadCount').textContent = unread; $('#playUnread').classList.toggle('hidden', !unread);
-  if (items.length) store.setSeen(conv, items[items.length - 1].ts);
-  renderChannels(); if (conv.startsWith('dm:')) renderDms();
-}
-
-// ---------- 歷史回放 ----------
-const player = $('#player'); let queue = [];
-function playMsg(id) {
-  unlockAudio();
-  document.querySelectorAll('.hist li.playing').forEach(li => li.classList.remove('playing'));
-  const li = document.querySelector(`.hist li[data-id="${id}"]`); if (li) li.classList.add('playing');
-  player.src = `/audio/${id}.wav`; player.dataset.id = id;
-  player.play().catch(err => toast('播放失敗：' + err.name));
-  store.markHeard(id);
-}
-player.addEventListener('ended', () => {
-  document.querySelectorAll('.hist li.playing').forEach(li => { li.classList.remove('playing'); li.classList.remove('unread'); });
-  if (queue.length) playMsg(queue.shift()); else renderHistory();
-});
-$('#historyList').addEventListener('click', (e) => { const id = e.target.dataset.play; if (id) { queue = []; playMsg(id); } });
-$('#playUnread').addEventListener('click', () => {
-  const heard = store.heard();
-  queue = S.history.filter(m => m.from !== S.myId && !heard[m.id]).map(m => m.id);
-  if (queue.length) playMsg(queue.shift());
-});
 
 // ---------- 事件 ----------
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
   ['channels', 'members', 'dms'].forEach(t => $('#tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
 }));
-$('#channelList').addEventListener('click', (e) => { const li = e.target.closest('li[data-ch]'); if (!li) return; if (li.dataset.ch === S.channel) { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); loadHistory(); } else wsSend({ t: 'join', channel: li.dataset.ch }); });
+$('#channelList').addEventListener('click', (e) => { const li = e.target.closest('li[data-ch]'); if (!li) return; if (li.dataset.ch === S.channel) { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); } else wsSend({ t: 'join', channel: li.dataset.ch }); });
 $('#createChannel').addEventListener('click', () => { const n = $('#newChannel').value.trim(); if (!n) return toast('請輸入頻道名稱'); wsSend({ t: 'create_channel', name: n }); $('#newChannel').value = ''; });
 $('#newChannel').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#createChannel').click(); });
 ['#memberList', '#otherList', '#dmList'].forEach(sel => $(sel).addEventListener('click', (e) => { const li = e.target.closest('li[data-uid]'); if (li) openDm(li.dataset.uid, li.dataset.name); }));
-$('#backToChannel').addEventListener('click', () => { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); loadHistory(); });
+$('#backToChannel').addEventListener('click', () => { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); });
 $('#logout').addEventListener('click', () => { localStorage.removeItem('ptt_name'); location.reload(); });
 
 function enter() {

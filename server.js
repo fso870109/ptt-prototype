@@ -1,4 +1,5 @@
-// PTT 原型伺服器：HTTP 靜態檔 + REST API + WebSocket（信令 + 語音轉發 + floor control）
+// PTT 原型伺服器：HTTP 靜態檔 + WebSocket（信令 + 語音即時轉發 + floor control）
+// 語音只做即時轉發：不寫入磁碟、不保留在記憶體，講完就沒有了。
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -10,25 +11,23 @@ const PORT = +process.env.PORT || 8800;
 const ROOT = __dirname;
 const PUB = path.join(ROOT, 'public');
 const DATA = path.join(ROOT, 'data');
-const AUDIO = path.join(DATA, 'audio');
-const DB = path.join(DATA, 'db.json');
+const DB = path.join(DATA, 'db.json');        // 只存頻道清單（沒有任何音訊）
 const SAMPLE_RATE = 16000;            // 客戶端上傳 16kHz / 16-bit / 單聲道 PCM
 const MAX_TALK_MS = 60000;            // 單次發話上限 60 秒
-const MIN_TALK_BYTES = SAMPLE_RATE * 2 * 0.3; // 少於 0.3 秒不存
 
-fs.mkdirSync(AUDIO, { recursive: true });
+fs.mkdirSync(DATA, { recursive: true });
 
 // ---------- 簡易 JSON 資料庫 ----------
-let db = { channels: [], messages: [] };
+let db = { channels: [] };
 try { db = JSON.parse(fs.readFileSync(DB, 'utf8')); } catch {}
-db.channels ||= []; db.messages ||= [];
+db = { channels: db.channels || [] }; // 舊版的 messages 欄位一律丟棄
 if (!db.channels.length) db.channels.push({ id: 'lobby', name: '大廳', createdAt: Date.now() });
 let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     const tmp = DB + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(db));
+    fs.writeFileSync(tmp, JSON.stringify({ channels: db.channels }));
     fs.renameSync(tmp, DB);
   }, 200);
 }
@@ -44,9 +43,11 @@ const cleanName = (s, n = 20) => String(s || '').replace(/[\u0000-\u001f<>]/g, '
 // ---------- 線上狀態 ----------
 /** userId -> { id, name, sockets:Set<ws>, channel } */
 const users = new Map();
-/** conv -> { userId, streamId, chunks:[], bytes, startedAt, timer } */
+/** conv -> { userId, ws, streamId, bytes, startedAt, lastAudio, timer }（bytes 只是計數，不保存內容） */
 const floors = new Map();
 let streamSeq = 1;
+/** conv -> { from, fromName, toName, ts, durMs }：只記「最近誰說過話」的純文字狀態，伺服器重啟即消失 */
+const lastTalk = new Map();
 
 function send(ws, obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function sendUser(userId, obj) { const u = users.get(userId); if (u) for (const s of u.sockets) send(s, obj); }
@@ -68,31 +69,20 @@ function broadcastPresence(channelId) {
 }
 function broadcastAll(obj) { for (const u of users.values()) for (const s of u.sockets) send(s, obj); }
 function channelInfo(c) {
-  const msgs = db.messages.filter(m => m.conv === c.id);
-  return { id: c.id, name: c.name, online: membersOf(c.id).length, last: msgs.length ? msgs[msgs.length - 1].ts : 0 };
+  const lt = lastTalk.get(c.id);
+  return { id: c.id, name: c.name, online: membersOf(c.id).length, last: lt ? lt.ts : 0, lastTalk: lt || null };
 }
 function dmSummaries(userId) {
-  const map = new Map();
-  for (const m of db.messages) if (isDm(m.conv) && dmParts(m.conv).includes(userId)) map.set(m.conv, m);
-  return [...map.entries()].map(([conv, m]) => {
+  const list = [...lastTalk.entries()].filter(([conv]) => isDm(conv) && dmParts(conv).includes(userId));
+  return list.map(([conv, m]) => {
     const other = dmParts(conv).find(x => x !== userId) || userId;
     const ou = users.get(other);
-    return { conv, peerId: other, peerName: ou ? ou.name : (m.from === other ? m.fromName : m.toName) || '對方', last: m.ts };
+    return { conv, peerId: other, peerName: ou ? ou.name : (m.from === other ? m.fromName : m.toName) || '對方', last: m.ts, lastTalk: m };
   });
 }
 function canAccess(userId, conv) {
   if (isDm(conv)) return dmParts(conv).includes(userId);
   return db.channels.some(c => c.id === conv);
-}
-
-// ---------- WAV ----------
-function wavHeader(dataLen) {
-  const b = Buffer.alloc(44);
-  b.write('RIFF', 0); b.writeUInt32LE(36 + dataLen, 4); b.write('WAVE', 8);
-  b.write('fmt ', 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
-  b.writeUInt32LE(SAMPLE_RATE, 24); b.writeUInt32LE(SAMPLE_RATE * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34);
-  b.write('data', 36); b.writeUInt32LE(dataLen, 40);
-  return b;
 }
 
 // ---------- Floor control ----------
@@ -101,52 +91,28 @@ function endFloor(conv, reason) {
   floors.delete(conv); clearTimeout(f.timer);
   const u = users.get(f.userId);
   const durMs = Math.round(f.bytes / 2 / SAMPLE_RATE * 1000);
-  let msg = null;
-  if (f.bytes >= MIN_TALK_BYTES) {
-    const id = uid();
-    const pcm = Buffer.concat(f.chunks);
-    fs.writeFileSync(path.join(AUDIO, id + '.wav'), Buffer.concat([wavHeader(pcm.length), pcm]));
+  let info = null;
+  if (f.bytes > 0) {
     let toName;
     if (isDm(conv)) { const other = dmParts(conv).find(x => x !== f.userId); toName = users.get(other)?.name; }
-    msg = { id, conv, from: f.userId, fromName: u ? u.name : '?', toName, ts: f.startedAt, durMs };
-    db.messages.push(msg); save();
+    info = { from: f.userId, fromName: u ? u.name : '?', toName, ts: f.startedAt, durMs };
+    lastTalk.set(conv, info);
   }
-  const ev = { t: 'talk_end', conv, streamId: f.streamId, from: f.userId, reason, message: msg };
-  broadcastConv(conv, ev);
-  if (msg && !isDm(conv)) broadcastAll({ t: 'channel_activity', channel: conv, last: msg.ts });
+  broadcastConv(conv, { t: 'talk_end', conv, streamId: f.streamId, from: f.userId, reason, lastTalk: info });
+  if (info && !isDm(conv)) broadcastAll({ t: 'channel_activity', channel: conv, last: info.ts, lastTalk: info });
 }
 
 // ---------- HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml', '.wav': 'audio/wav' };
+  '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); }
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
-  if (p === '/api/health') return json(res, 200, { ok: true, online: onlineList().length, channels: db.channels.length, messages: db.messages.length });
+  if (p === '/api/health') return json(res, 200, { ok: true, online: onlineList().length, channels: db.channels.length, activeTalks: floors.size, storesAudio: false });
   if (p === '/api/channels') return json(res, 200, db.channels.map(channelInfo));
-  if (p === '/api/history') {
-    const conv = url.searchParams.get('conv') || '';
-    const user = url.searchParams.get('user') || '';
-    const since = +url.searchParams.get('since') || 0;
-    if (!canAccess(user, conv)) return json(res, 403, { error: 'forbidden' });
-    return json(res, 200, db.messages.filter(m => m.conv === conv && m.ts > since).slice(-200));
-  }
-  const am = p.match(/^\/audio\/([0-9a-f]{16})\.wav$/);
-  if (am) {
-    const file = path.join(AUDIO, am[1] + '.wav');
-    if (!fs.existsSync(file)) { res.writeHead(404); return res.end(); }
-    const size = fs.statSync(file).size;
-    const range = req.headers.range && req.headers.range.match(/bytes=(\d*)-(\d*)/);
-    if (range) { // iOS Safari 需要 Range 支援才能播放 audio
-      const start = range[1] ? +range[1] : 0, end = range[2] ? Math.min(+range[2], size - 1) : size - 1;
-      res.writeHead(206, { 'Content-Type': 'audio/wav', 'Content-Range': `bytes ${start}-${end}/${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1 });
-      return fs.createReadStream(file, { start, end }).pipe(res);
-    }
-    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': size, 'Accept-Ranges': 'bytes' });
-    return fs.createReadStream(file).pipe(res);
-  }
+  if (p.startsWith('/api/') || p.startsWith('/audio/')) return json(res, 404, { error: 'not_found' }); // 沒有歷史、沒有錄音檔
   let f = path.normalize(path.join(PUB, p === '/' ? 'index.html' : p));
   if (!f.startsWith(PUB) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(PUB, 'index.html');
   res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
@@ -168,8 +134,8 @@ wss.on('connection', (ws) => {
       if (!fl || fl.userId !== me.id || fl.ws !== ws) return;
       const buf = Buffer.from(data);
       if (fl.bytes + buf.length > SAMPLE_RATE * 2 * (MAX_TALK_MS / 1000 + 1)) return;
-      fl.chunks.push(buf); fl.bytes += buf.length; fl.lastAudio = now();
-      const out = Buffer.alloc(4 + buf.length); out.writeUInt32BE(fl.streamId, 0); buf.copy(out, 4);
+      fl.bytes += buf.length; fl.lastAudio = now(); // 只計長度，不保留音訊
+      const out = Buffer.allocUnsafe(4 + buf.length); out.writeUInt32BE(fl.streamId, 0); buf.copy(out, 4);
       for (const id of recipients(talking)) if (id !== me.id) { const u = users.get(id); for (const s of u.sockets) if (s.readyState === 1) s.send(out); }
       return;
     }
@@ -211,11 +177,13 @@ wss.on('connection', (ws) => {
         let conv = m.conv;
         if (m.to) conv = dmKey(me.id, m.to);
         if (!conv || !canAccess(me.id, conv) || (!isDm(conv) && me.channel !== conv)) return send(ws, { t: 'floor_denied', conv, reason: 'no_access' });
+        // 沒有錄音保存：私人對講對象不在線就直接拒絕
+        if (isDm(conv)) { const peer = dmParts(conv).find(x => x !== me.id); const pu = users.get(peer); if (!pu || !pu.sockets.size) return send(ws, { t: 'floor_denied', conv, reason: 'offline', byName: pu ? pu.name : '' }); }
         if (talking) endFloor(talking, 'switch');
         const cur = floors.get(conv);
         if (cur && cur.userId !== me.id) return send(ws, { t: 'floor_denied', conv, reason: 'busy', by: cur.userId, byName: users.get(cur.userId)?.name });
         if (cur) endFloor(conv, 'restart');
-        const f = { userId: me.id, ws, streamId: streamSeq++, chunks: [], bytes: 0, startedAt: now(), lastAudio: now() };
+        const f = { userId: me.id, ws, streamId: streamSeq++, bytes: 0, startedAt: now(), lastAudio: now() };
         f.timer = setTimeout(() => { if (floors.get(conv) === f) { endFloor(conv, 'timeout'); talking = null; send(ws, { t: 'floor_revoked', conv, reason: 'timeout' }); } }, MAX_TALK_MS);
         floors.set(conv, f); talking = conv;
         send(ws, { t: 'floor_granted', conv, streamId: f.streamId, maxMs: MAX_TALK_MS });
