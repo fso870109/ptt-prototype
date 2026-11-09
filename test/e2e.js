@@ -30,7 +30,9 @@ function client(token, label) {
   });
 }
 function tone(ms, f = 440) { const n = 16000 * ms / 1000; const b = Buffer.alloc(n * 2); for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.sin(2 * Math.PI * f * i / 16000) * 8000), i * 2); return b; }
-async function waitClosed(c, ms = 8000) { const t0 = Date.now(); while (c.closed === null && Date.now() - t0 < ms) await sleep(50); return c.closed; }
+async function isOnlineAdm(tok, id) { const r = await http('GET', '/api/admin/users', null, tok); return r.body.users.find(u => u.id === id)?.online; }
+// 經過 Render 代理時，伺服器端關閉的 WebSocket 不一定會即時傳到客戶端；前端收到 auth_failed 會自行關閉
+async function waitClosed(c, ms = 4000) { const t0 = Date.now(); while (c.closed === null && Date.now() - t0 < ms) await sleep(50); return c.closed; }
 async function talk(c, conv, ms = 300, extra = {}) {
   c.send({ t: 'ptt_start', conv, ...extra });
   const g = await c.wait(m => (m.t === 'floor_granted' || m.t === 'floor_denied') && !m._seen); g._seen = true; return g;
@@ -177,14 +179,16 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('移除頻道成員 → 立即被移回大廳', moved.channel === 'lobby');
     const dis = await http('PATCH', `/api/admin/users/${m2.id}`, { disabled: true }, adminTok);
     const cl2 = await waitClosed(C[m2.id]); const lg2 = (await http('POST', '/api/login', { username: m2.username, password: m2.password })).status;
-    ok('停用使用者 → 立即斷線，且無法再登入', dis.status === 200 && C[m2.id].has(m => m.t === 'auth_failed') && cl2 !== null && lg2 === 403, `close=${cl2} login=${lg2}`);
+    const on2 = await isOnlineAdm(adminTok, m2.id);
+    ok('停用使用者 → 立即被踢下線（收到 auth_failed、伺服器標為離線），且無法再登入', dis.status === 200 && C[m2.id].has(m => m.t === 'auth_failed') && on2 === false && lg2 === 403, `auth_failed=${C[m2.id].has(m => m.t === 'auth_failed')} 伺服器在線=${on2} close=${cl2} login=${lg2}`);
     const offDm = await talk(C[m1.id], undefined, 0, { to: m2.id });
     ok('對不在線（已停用）的人私人對講被拒', offDm.t === 'floor_denied');
     const rp = await http('PATCH', `/api/admin/users/${m1.id}`, { resetPassword: true }, adminTok);
     const cl1 = await waitClosed(C[m1.id]);
     const oldTokOk = (await http('GET', '/api/me', null, tok[m1.id])).status;
     const newOk = !!(await login(m1.username, rp.body.password)), oldPwOk = !!(await login(m1.username, m1.password));
-    ok('重設密碼 → 產生新密碼、舊登入失效、新密碼可登入', rp.body.password && oldTokOk === 401 && cl1 !== null && newOk && !oldPwOk, `close=${cl1} oldToken=${oldTokOk} new=${newOk} oldPw=${oldPwOk}`);
+    const on1 = await isOnlineAdm(adminTok, m1.id);
+    ok('重設密碼 → 產生新密碼、舊登入與連線失效、新密碼可登入', rp.body.password && oldTokOk === 401 && C[m1.id].has(m => m.t === 'auth_failed') && on1 === false && newOk && !oldPwOk, `伺服器在線=${on1} close=${cl1} oldToken=${oldTokOk} new=${newOk} oldPw=${oldPwOk}`);
     ok('管理員不能停用自己', (await http('PATCH', `/api/admin/users/${meA.body.user.id}`, { disabled: true }, adminTok)).status === 400);
     const supC = C[sup.id]; supC.clear();
     const del = await http('DELETE', `/api/admin/channels/${CH}`, null, adminTok);
