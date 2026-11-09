@@ -234,7 +234,7 @@ function handle(m) {
       if (m.reason === 'busy') { const was = S.pressing; S.pressing = false; S.pending = []; btn.classList.remove('pressing', 'talking'); releaseMicLater(); if (was) flashBusy(m.byName); }
       else { pttUp(); toast('無法發話：' + (m.reason === 'no_access' ? '請先加入頻道' : m.reason)); }
       break;
-    case 'floor_revoked': pttUp(); toast('已達單次發話上限 60 秒'); break;
+    case 'floor_revoked': pttUp(); toast(m.reason === 'stalled' ? '網路不穩，語音中斷，已結束發話' : '已達單次發話上限 60 秒'); break;
     case 'talk_start':
       S.activeTalks.set(m.conv, { from: m.from, fromName: m.fromName, streamId: m.streamId });
       S.liveStreams.set(m.streamId, { nextTime: 0, from: m.from, conv: m.conv });

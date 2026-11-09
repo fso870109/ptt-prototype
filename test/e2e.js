@@ -87,9 +87,9 @@ function tone(ms, f = 440) { const n = 16000 * ms / 1000; const b = Buffer.alloc
   // 斷線釋放發言權
   A.send({ t: 'ptt_start', conv: ch }); await A.wait(m => m.t === 'floor_granted' && m.conv === ch && m.streamId > gd.streamId);
   A.ws.terminate();
-  const te2 = await B.wait(m => m.t === 'talk_end' && m.reason === 'disconnect');
+  const t1 = Date.now(); const te2 = await B.wait(m => m.t === 'talk_end' && (m.reason === 'disconnect' || m.reason === 'stalled'), 25000);
   B.send({ t: 'ptt_start', conv: ch }); const g3 = await B.wait(m => m.t === 'floor_granted' && m.streamId > gd.streamId);
-  ok('講話者斷線時伺服器自動釋放發言權', !!te2 && !!g3); B.send({ t: 'ptt_stop' });
+  ok('講話者斷線時伺服器自動釋放發言權', !!te2 && !!g3, `原因=${te2.reason}，${Date.now() - t1}ms 內釋放`); B.send({ t: 'ptt_stop' });
   // 重新連線：同 id 回來，伺服器記得頻道
   const A2 = await client(A.id, '測試A');
   const j = await A2.wait(m => m.t === 'joined');

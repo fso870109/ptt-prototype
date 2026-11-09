@@ -168,7 +168,7 @@ wss.on('connection', (ws) => {
       if (!fl || fl.userId !== me.id || fl.ws !== ws) return;
       const buf = Buffer.from(data);
       if (fl.bytes + buf.length > SAMPLE_RATE * 2 * (MAX_TALK_MS / 1000 + 1)) return;
-      fl.chunks.push(buf); fl.bytes += buf.length;
+      fl.chunks.push(buf); fl.bytes += buf.length; fl.lastAudio = now();
       const out = Buffer.alloc(4 + buf.length); out.writeUInt32BE(fl.streamId, 0); buf.copy(out, 4);
       for (const id of recipients(talking)) if (id !== me.id) { const u = users.get(id); for (const s of u.sockets) if (s.readyState === 1) s.send(out); }
       return;
@@ -215,7 +215,7 @@ wss.on('connection', (ws) => {
         const cur = floors.get(conv);
         if (cur && cur.userId !== me.id) return send(ws, { t: 'floor_denied', conv, reason: 'busy', by: cur.userId, byName: users.get(cur.userId)?.name });
         if (cur) endFloor(conv, 'restart');
-        const f = { userId: me.id, ws, streamId: streamSeq++, chunks: [], bytes: 0, startedAt: now() };
+        const f = { userId: me.id, ws, streamId: streamSeq++, chunks: [], bytes: 0, startedAt: now(), lastAudio: now() };
         f.timer = setTimeout(() => { if (floors.get(conv) === f) { endFloor(conv, 'timeout'); talking = null; send(ws, { t: 'floor_revoked', conv, reason: 'timeout' }); } }, MAX_TALK_MS);
         floors.set(conv, f); talking = conv;
         send(ws, { t: 'floor_granted', conv, streamId: f.streamId, maxMs: MAX_TALK_MS });
@@ -241,7 +241,15 @@ wss.on('connection', (ws) => {
   });
 });
 
-// 心跳：清掉死連線
-setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; ws.ping(); } }, 20000);
+// 心跳：清掉死連線（經過雲端代理時，對方斷網不一定會立刻觸發 close）
+setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; ws.ping(); } }, 10000);
+// 發話中超過 STALL_MS 沒收到語音封包（例如手機斷網）→ 自動釋放發言權；剛按下尚未有音訊時給 10 秒（第一次要等麥克風權限）
+const STALL_MS = 3000;
+setInterval(() => {
+  for (const [conv, f] of floors) if (now() - f.lastAudio > (f.bytes ? STALL_MS : 10000)) {
+    endFloor(conv, 'stalled');
+    send(f.ws, { t: 'floor_revoked', conv, reason: 'stalled' });
+  }
+}, 500);
 
 server.listen(PORT, () => console.log(`[ptt] listening on :${PORT}`));
