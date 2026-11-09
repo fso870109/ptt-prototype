@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { Store } = require('./lib/store');
 const A = require('./lib/auth');
+const { Media, PHOTO_MAX_BYTES, PHOTO_RETENTION_MS, PHOTO_QUOTA_BYTES, TEXT_MAX, ALLOWED_MIME, sniffMime } = require('./lib/media');
 
 const PORT = +process.env.PORT || 8800;
 const PUB = path.join(__dirname, 'public');
@@ -22,6 +23,7 @@ const CH_ROLES = { supervisor: { label: '主管', prio: 3, talk: true }, member:
 const ALERT_PRIO = 100;
 
 const store = new Store({ databaseUrl: process.env.DATABASE_URL || '', dataDir: process.env.DATA_DIR || path.join(__dirname, 'data') });
+const media = new Media(store);
 const D = () => store.doc;
 const now = () => Date.now();
 const uid = (n = 8) => crypto.randomBytes(n).toString('hex');
@@ -43,6 +45,11 @@ function roleIn(u, ch) {
   if (u.role === 'admin') return 'supervisor';
   if (ch.open) return 'member';
   return null;
+}
+function canAccess(u, conv) {
+  if (!u || !conv) return false;
+  if (isDm(conv)) return dmParts(conv).includes(u.id);
+  return !!roleIn(u, chById(conv));
 }
 function ensureLobby() { if (!chById('lobby')) D().channels.unshift({ id: 'lobby', name: '大廳', open: true, members: {}, createdAt: now() }); }
 async function seedAdmin() {
@@ -208,11 +215,16 @@ function endAlert(a, byUser) {
 
 // ---------- HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
-function json(res, code, obj) { res.writeHead(code, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); }
-function readBody(req) {
+function cors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+}
+function json(res, code, obj) { cors(res); res.writeHead(code, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); }
+function readBody(req, max = 20000) {
   return new Promise((resolve) => {
     let size = 0; const chunks = [];
-    req.on('data', (c) => { size += c.length; if (size > 20000) { req.destroy(); resolve(null); } else chunks.push(c); });
+    req.on('data', (c) => { size += c.length; if (size > max) { req.destroy(); resolve(null); } else chunks.push(c); });
     req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {}); } catch { resolve(null); } });
   });
 }
@@ -223,7 +235,10 @@ function noteFail(key) { const r = loginFails.get(key) || { n: 0, until: 0 }; if
 
 async function api(req, res, p, url) {
   const method = req.method;
-  if (p === '/api/health') return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, activeTalks: floors.size, activeAlerts: alerts.size, storesAudio: false });
+  if (p === '/api/health') {
+    const ms = await media.stats();
+    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, activeTalks: floors.size, activeAlerts: alerts.size, storesAudio: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES });
+  }
   if (p === '/api/login' && method === 'POST') {
     const b = await readBody(req); if (!b) return json(res, 400, { error: 'bad_request' });
     const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
@@ -246,6 +261,56 @@ async function api(req, res, p, url) {
   }
   if (p === '/api/locations') return json(res, 200, { locations: locsFor(me) });
   if (p === '/api/alerts') return json(res, 200, { alerts: alertsVisibleTo(me) });
+  if (p === '/api/messages' && method === 'GET') {
+    const conv = url.searchParams.get('conv') || '';
+    if (!canAccess(me, conv)) return json(res, 403, { error: 'forbidden', message: '沒有這個對話的權限' });
+    const since = +url.searchParams.get('since') || 0;
+    const limit = +url.searchParams.get('limit') || 100;
+    return json(res, 200, { messages: await media.listMessages(conv, { since, limit }) });
+  }
+  if (p === '/api/messages' && method === 'POST') {
+    const b = await readBody(req, 8000); if (!b) return json(res, 400, { error: 'bad_request' });
+    const conv = String(b.conv || '');
+    if (!canAccess(me, conv)) return json(res, 403, { error: 'forbidden', message: '沒有這個對話的權限' });
+    if (isDm(conv)) { /* 文字私訊允許對方離線 */ }
+    else if (!roleIn(me, chById(conv))) return json(res, 403, { error: 'forbidden' });
+    const text = String(b.text || '').replace(/\u0000/g, '').trim();
+    if (!text) return json(res, 400, { error: 'empty', message: '請輸入文字' });
+    if (text.length > TEXT_MAX) return json(res, 400, { error: 'too_long', message: '文字最多 ' + TEXT_MAX + ' 字' });
+    const msg = { id: 'm' + uid(8), conv, from: me.id, fromName: me.displayName, kind: 'text', text, ts: now() };
+    await media.addMessage(msg);
+    broadcastConv(conv, { t: 'chat', message: msg }, me.id);
+    sendUser(me.id, { t: 'chat', message: msg });
+    return json(res, 201, { message: msg });
+  }
+  if (p === '/api/photos' && method === 'POST') {
+    const b = await readBody(req, 400000); if (!b) return json(res, 400, { error: 'bad_request', message: '請求太大或格式不對' });
+    const conv = String(b.conv || '');
+    if (!canAccess(me, conv)) return json(res, 403, { error: 'forbidden', message: '沒有這個對話的權限' });
+    let buf;
+    try { buf = Buffer.from(String(b.data || ''), 'base64'); } catch { return json(res, 400, { error: 'bad_data' }); }
+    if (!buf.length) return json(res, 400, { error: 'empty', message: '沒有圖片資料' });
+    if (buf.length > PHOTO_MAX_BYTES) return json(res, 413, { error: 'too_large', message: '照片超過約 200KB，請再壓縮' });
+    const mime = sniffMime(buf);
+    if (!mime || !ALLOWED_MIME.has(mime)) return json(res, 400, { error: 'bad_type', message: '只接受 JPEG、WebP 或 PNG' });
+    const id = uid(8);
+    const ts = now();
+    await media.addPhoto({ id, conv, mime, buf, ts });
+    const msg = { id: 'm' + uid(8), conv, from: me.id, fromName: me.displayName, kind: 'photo', photoId: id, mime, ts };
+    await media.addMessage(msg);
+    broadcastConv(conv, { t: 'chat', message: msg }, me.id);
+    sendUser(me.id, { t: 'chat', message: msg });
+    return json(res, 201, { message: msg });
+  }
+  const photoGet = p.match(/^\/api\/photos\/([0-9a-f]{16})$/);
+  if (photoGet && method === 'GET') {
+    const ph = await media.getPhoto(photoGet[1]);
+    if (!ph) return json(res, 404, { error: 'not_found' });
+    if (!canAccess(me, ph.conv)) return json(res, 403, { error: 'forbidden', message: '沒有這張照片的權限' });
+    cors(res);
+    res.writeHead(200, { 'Content-Type': ph.mime, 'Content-Length': ph.buf.length, 'Cache-Control': 'private, max-age=86400' });
+    return res.end(ph.buf);
+  }
 
   // ----- 管理後台 -----
   if (!p.startsWith('/api/admin/')) return json(res, 404, { error: 'not_found' });
@@ -287,7 +352,9 @@ async function api(req, res, p, url) {
       if (u.id === me.id) return json(res, 400, { error: 'self_lockout', message: '不能刪除自己' });
       D().users = D().users.filter(x => x.id !== u.id); revokeSessions(u.id);
       for (const c of D().channels) delete c.members[u.id];
-      locations.delete(u.id); await store.save(); kick(u.id); online.delete(u.id); broadcastOnline();
+      locations.delete(u.id);
+      media.convsForUser(u.id).then(cs => media.deleteConvs(cs)).catch(e => console.error('[media]', e.message));
+      await store.save(); kick(u.id); online.delete(u.id); broadcastOnline();
       return json(res, 200, { ok: true });
     }
   }
@@ -310,7 +377,9 @@ async function api(req, res, p, url) {
     if (!seg[2] && method === 'DELETE') {
       if (c.id === 'lobby') return json(res, 400, { error: 'protected', message: '大廳不能刪除' });
       endFloor(c.id, 'deleted');
-      D().channels = D().channels.filter(x => x.id !== c.id); lastTalk.delete(c.id); await store.save();
+      D().channels = D().channels.filter(x => x.id !== c.id); lastTalk.delete(c.id);
+      await media.deleteConvs([c.id]).catch(e => console.error('[media]', e.message));
+      await store.save();
       for (const id of online.keys()) enforceAccess(id);
       return json(res, 200, { ok: true });
     }
@@ -333,6 +402,7 @@ async function api(req, res, p, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x'); const p = url.pathname;
   try {
+    if (req.method === 'OPTIONS') { cors(res); res.writeHead(204); return res.end(); }
     if (p.startsWith('/api/')) return await api(req, res, p, url);
     if (p.startsWith('/audio/')) return json(res, 404, { error: 'not_found' }); // 不保存錄音
     let rel = p === '/' ? 'index.html' : p === '/admin' || p === '/admin/' ? 'admin.html' : p.slice(1);
@@ -446,6 +516,18 @@ wss.on('connection', (ws) => {
         if (me.role !== 'admin' && a.userId !== me.id) return send(ws, { t: 'error', code: 'forbidden', msg: '只有管理員或發送者可以解除警報' });
         endAlert(a, me); break;
       }
+      case 'chat': {
+        const conv = String(m.conv || '');
+        if (!canAccess(me, conv)) return send(ws, { t: 'error', code: 'forbidden', msg: '沒有這個對話的權限' });
+        const text = String(m.text || '').replace(/\u0000/g, '').trim();
+        if (!text) return send(ws, { t: 'error', code: 'empty', msg: '請輸入文字' });
+        if (text.length > TEXT_MAX) return send(ws, { t: 'error', code: 'too_long', msg: '文字最多 ' + TEXT_MAX + ' 字' });
+        const msg = { id: 'm' + uid(8), conv, from: me.id, fromName: me.displayName, kind: 'text', text, ts: now() };
+        media.addMessage(msg).catch(e => console.error('[chat]', e.message));
+        broadcastConv(conv, { t: 'chat', message: msg }, me.id);
+        sendUser(me.id, { t: 'chat', message: msg });
+        break;
+      }
       case 'ping': send(ws, { t: 'pong', ts: m.ts }); break;
     }
   });
@@ -467,9 +549,12 @@ setInterval(() => {
 
 (async () => {
   await store.init();
+  await media.init();
   ensureLobby();
   await seedAdmin();
   await store.save();
+  media.cleanup().then(r => console.log('[media] cleanup', r)).catch(e => console.error('[media] cleanup', e.message));
+  setInterval(() => media.cleanup().catch(e => console.error('[media] cleanup', e.message)), 3600e3);
   server.listen(PORT, () => console.log(`[ptt] listening on :${PORT} (storage=${store.kind})`));
 })().catch(e => { console.error('[ptt] startup failed', e); process.exit(1); });
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, async () => { try { await store.close(); } catch {} process.exit(0); });

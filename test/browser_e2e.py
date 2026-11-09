@@ -55,6 +55,9 @@ try:
     time.sleep(1.2); A.mouse.up(); time.sleep(1.2)
     ok('A 送出語音、B 即時收到', bins['小明']['out'] >= 10 and bins['小華']['in'] >= 10, f"送 {bins['小明']['out']} / 收 {bins['小華']['in']}")
     ok('B 顯示「最近說話：小明」', '最近說話：小明' in B.inner_text('#lastTalk'))
+    A.fill('#chatInput', '哈囉這是文字訊息'); A.click('#chatForm .send-btn')
+    B.wait_for_function("document.querySelector('#chatList').innerText.includes('哈囉這是文字訊息')", timeout=8000)
+    ok('B 即時看到 A 送出的文字訊息', '哈囉這是文字訊息' in B.inner_text('#chatList') and '小明' in B.inner_text('#chatList'))
     # 只聽
     api('PUT', f"/api/admin/channels/lobby/members/{users['小華']['id']}", {'role': 'listener'}, ADM)
     B.wait_for_function("document.querySelector('#pttText').textContent.includes('只聽')", timeout=8000)

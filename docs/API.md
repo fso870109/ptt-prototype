@@ -494,14 +494,63 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 
 ## 8. 文字與照片訊息
 
-> 本段規格在「文字與照片」功能上線後生效；上線前相關路徑會 404。
+語音仍然不保存。文字與照片會保存（Postgres 資料表 `ptt_chat` / `ptt_photos`；本機無資料庫時為 `data/chat.json` + `data/photos/`）。
 
-規劃：
-- 頻道與一對一可送文字、照片（客戶端壓縮：長邊 ≤ 1280、JPEG 或 WebP、約 200 KB 以內）。
-- 文字與照片中繼資料、照片位元組存 Postgres；**仍不存音訊**。
-- 照片保留約 7 天，並有容量上限，超出時由舊到新自動刪除。
-- `GET /api/photos/:id` 需登入，且呼叫者必須有該對話（頻道或該則私訊）的權限，否則 401／403。
-- 即時推播預計使用 WebSocket 事件 `t: "chat"`（欄位以實作為準，實作後會更新本節）。
+### 8.1 `GET /api/messages?conv=<id>&since=<ms>&limit=<n>`
+需登入且對該 `conv` 有權限（頻道成員／管理員，或私訊雙方），否則 `401`／`403`。
+
+```json
+{
+  "messages": [
+    { "id": "m…", "conv": "lobby", "from": "u…", "fromName": "小明", "kind": "text", "text": "你好", "ts": 1731200000000 },
+    { "id": "m…", "conv": "lobby", "from": "u…", "fromName": "小明", "kind": "photo", "photoId": "ab…16hex", "mime": "image/jpeg", "ts": 1731200000000 }
+  ]
+}
+```
+`since` 預設 0（只回傳 `ts > since`）；`limit` 預設 100、上限 200。依時間正序。
+
+### 8.2 `POST /api/messages`
+```json
+{ "conv": "lobby", "text": "你好" }
+```
+成功 `201 { "message": { ... kind:"text" } }`。文字去掉頭尾空白後不可為空，最長 2000 字。  
+一對一允許對方離線（與語音不同）。
+
+也可透過 WebSocket 送 `{ "t": "chat", "conv": "lobby", "text": "你好" }`，效果相同。
+
+### 8.3 `POST /api/photos`
+```json
+{ "conv": "lobby", "data": "<標準 base64，不要 data: 前綴>" }
+```
+成功 `201 { "message": { "kind":"photo", "photoId":"…", "mime":"image/jpeg" } }`。
+
+伺服器端限制：
+- 解碼後大小 **≤ 220 KB**（客戶端應壓到約 200 KB 以內），超過回 `413 too_large`
+- 以檔頭辨識 MIME，只接受 **JPEG / WebP / PNG**（`bad_type`）
+- 請求 JSON 上限約 400 KB
+
+客戶端建議：長邊縮到 ≤ 1280，再以 WebP 或 JPEG 品質約 0.8 往下調到 ≤ 200 KB（網頁版已實作）。
+
+### 8.4 `GET /api/photos/:id`
+`:id` 為 16 位十六進位。需 `Authorization: Bearer`。
+- 未登入 `401`
+- 已登入但沒有該照片所屬對話的權限 `403`
+- 成功回傳原始圖片位元組，`Content-Type` 為實際 MIME，`Cache-Control: private, max-age=86400`
+
+請用 fetch（帶 token）轉成 blob URL 顯示，不要把 token 放到圖片 URL 的 query string。
+
+### 8.5 WebSocket `chat`
+伺服器廣播（對話內在線成員 + 發送者自己的所有連線）：
+```json
+{ "t": "chat", "message": { "id", "conv", "from", "fromName", "kind": "text"|"photo", "text?", "photoId?", "mime?", "ts" } }
+```
+
+### 8.6 保留與清理
+- 照片保留 **7 天**（依上傳時間）
+- 所有照片合計超過 **300 MB** 時，由最舊的開始刪，直到低於上限
+- 啟動時清理一次，之後每小時一次
+- 刪除頻道時一併刪該頻道的文字／照片；刪除使用者時刪其私訊對話
+- 免費 Postgres 總容量 1 GB，請把照片配額與狀態 JSON 一併計算
 
 ---
 

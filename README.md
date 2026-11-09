@@ -35,6 +35,14 @@
    - 警報期間發送者取得**最高發話權（優先權 100）**，連「只聽」角色也能講，並可中斷主管。
    - 管理員可在對講畫面或後台**解除警報**；發送者也可以自行取消。警報只存在記憶體，不保存錄音。
 
+### 文字與照片
+- 頻道與一對一可送文字（最長 2000 字）與照片。
+- 網頁端會先壓縮：長邊不超過 1280，JPEG／WebP，盡量壓到約 200KB 以內；伺服器拒絕超過 220KB 或非 JPEG/WebP/PNG 的檔案。
+- 文字與照片存在 Postgres（本機則 `data/chat.json` + `data/photos/`）。**語音仍然不保存。**
+- 照片保留 **7 天**；全部照片合計超過 **300MB** 時由舊到新自動刪除（啟動時與每小時清理）。免費 Postgres 總容量 1GB。
+- 讀取照片必須登入，且要有該頻道或該則私訊的權限（未登入 401，沒權限 403）。
+- API 詳見 [`docs/API.md`](docs/API.md)。
+
 ## 架構
 ```
 手機瀏覽器 ──WebSocket /ws（hello 帶 token）──▶ Node.js 伺服器 ──▶ 同頻道／私訊的線上成員
@@ -71,6 +79,8 @@
 | `public/admin.html` `admin.js` `admin.css` | 管理後台 |
 | `public/vendor/leaflet/` | Leaflet 1.9.4 |
 | `render.yaml` | Render Blueprint（web service + free Postgres） |
+| `docs/API.md` | 供原生 App 使用的協定說明 |
+| `lib/media.js` | 文字／照片儲存與 7 天／容量清理 |
 | `test/e2e.js` | 協定層測試（多帳號；登入、後台、權限、優先搶話、位置、警報、不保存錄音） |
 | `test/browser_e2e.py` | 真實瀏覽器測試（Chromium + 假麥克風 + 模擬定位） |
 

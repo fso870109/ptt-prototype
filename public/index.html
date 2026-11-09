@@ -82,6 +82,13 @@
   </div>
 
   <div class="history">
+    <div class="history-head"><strong>訊息</strong><span class="muted small">文字與照片會保存；語音不保存</span></div>
+    <ul id="chatList" class="chat"></ul>
+    <form id="chatForm" class="chat-form">
+      <input id="chatInput" maxlength="2000" placeholder="輸入文字訊息…" autocomplete="off">
+      <label class="photo-btn" title="拍照或選圖">📷<input type="file" id="chatPhoto" accept="image/*" hidden></label>
+      <button type="submit" class="send-btn">送出</button>
+    </form>
     <div class="history-head"><strong>最近動態</strong><span class="muted small">只即時播放，不保存錄音</span></div>
     <div id="lastTalk" class="last-talk">這裡還沒有人說話</div>
     <ul id="activityList" class="hist"></ul>

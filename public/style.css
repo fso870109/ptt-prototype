@@ -85,3 +85,14 @@ button.link{background:none;color:#38bdf8;padding:4px 6px}
 .loc-list li{cursor:default;font-size:14px}
 .leaflet-container{font-family:inherit}
 a.link,a.link:visited{color:#38bdf8;text-decoration:none}
+
+.chat{list-style:none;margin:0;padding:0;max-height:28vh;overflow:auto}
+.chat li{padding:8px 10px;margin-bottom:6px;background:#1e293b;border-radius:10px}
+.chat li.mine{background:#164e63}
+.chat .meta{font-size:12px;color:#94a3b8;margin-bottom:4px}
+.chat .body{font-size:15px;white-space:pre-wrap;word-break:break-word}
+.chat img{max-width:100%;max-height:220px;border-radius:8px;display:block;margin-top:4px;cursor:pointer}
+.chat-form{display:flex;gap:6px;margin:8px 0 12px;align-items:center}
+.chat-form input[type=text],.chat-form #chatInput{flex:1;margin:0}
+.photo-btn{flex:none;background:#334155;border-radius:12px;padding:10px 12px;cursor:pointer;font-size:18px}
+.send-btn{flex:none;background:#0ea5e9;font-weight:600;padding:10px 14px}

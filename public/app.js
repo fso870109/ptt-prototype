@@ -19,6 +19,7 @@ const S = {
   activeTalks: new Map(),  // conv -> {from, fromName, streamId}
   pressing: false, granted: false, streamId: 0, pending: [], pendingConv: '',
   alerts: new Map(), ackedAlerts: new Set(), locs: new Map(),
+  chat: [], chatConv: '',
 };
 // ---------- 音訊：AudioContext 解鎖（iOS Safari 必須在使用者手勢中 resume）----------
 let actx = null;
@@ -376,6 +377,11 @@ function handle(m) {
     case 'loc_remove': S.locs.delete(m.id); renderLocs(); break;
     case 'alert': S.alerts.set(m.alert.id, m.alert); S.ackedAlerts.delete(m.alert.id); renderAlerts(); break;
     case 'alert_end': S.alerts.delete(m.id); renderAlerts(); toast(`✅ 警報已由 ${m.by} 解除`); break;
+    case 'chat':
+      if (m.message && m.message.conv === currentConv()) {
+        if (!S.chat.some(x => x.id === m.message.id)) { S.chat.push(m.message); renderChat(); }
+      }
+      break;
     case 'error': toast(m.msg); break;
   }
 }
@@ -449,7 +455,84 @@ function renderActivity() {
   $('#lastTalk').textContent = lt ? `最近說話：${lt.from === S.myId ? '我' : lt.fromName} · ${fmtTime(lt.ts)} · ${(lt.durMs / 1000).toFixed(1)} 秒` : '這裡還沒有人說話';
   const items = S.log.filter(x => x.conv === conv).slice(-30).reverse();
   $('#activityList').innerHTML = items.map(x => x.note ? `<li class="muted"><span>⚠️ ${esc(x.note)}</span><span class="when">${fmtTime(x.ts)}</span></li>` : `<li class="${x.from === S.myId ? 'mine' : ''}"><span class="who">${esc(x.from === S.myId ? '我' : x.fromName)}</span><span class="when">${fmtTime(x.ts)} · ${(x.durMs / 1000).toFixed(1)} 秒</span></li>`).join('') || '<li class="muted">本次開啟後還沒有對講</li>';
+  if (conv !== S.chatConv) loadChat(conv);
 }
+
+function authHeaders() { return { Authorization: 'Bearer ' + store.token }; }
+async function loadChat(conv) {
+  conv = conv || currentConv();
+  S.chatConv = conv;
+  if (!conv || !store.token) { S.chat = []; renderChat(); return; }
+  try {
+    const r = await fetch('/api/messages?conv=' + encodeURIComponent(conv) + '&limit=100', { headers: authHeaders(), cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    if (conv !== currentConv()) return;
+    S.chat = j.messages || [];
+    renderChat();
+  } catch { if (conv === currentConv()) { S.chat = []; renderChat(); } }
+}
+const photoUrlCache = new Map();
+async function photoSrc(id) {
+  if (photoUrlCache.has(id)) return photoUrlCache.get(id);
+  const r = await fetch('/api/photos/' + id, { headers: authHeaders() });
+  if (!r.ok) return '';
+  const url = URL.createObjectURL(await r.blob());
+  photoUrlCache.set(id, url);
+  return url;
+}
+function renderChat() {
+  const el = $('#chatList'); if (!el) return;
+  const conv = currentConv();
+  if (!conv) { el.innerHTML = '<li class="muted">請先選擇頻道或私人對講</li>'; return; }
+  el.innerHTML = S.chat.map(m => {
+    const mine = m.from === S.myId;
+    const who = `<div class="meta">${esc(mine ? '我' : m.fromName)} · ${fmtTime(m.ts)}</div>`;
+    if (m.kind === 'photo') return `<li class="${mine ? 'mine' : ''}" data-mid="${esc(m.id)}">${who}<img data-photo="${esc(m.photoId)}" alt="照片"></li>`;
+    return `<li class="${mine ? 'mine' : ''}" data-mid="${esc(m.id)}">${who}<div class="body">${esc(m.text)}</div></li>`;
+  }).join('') || '<li class="muted">還沒有文字或照片。語音不會出現在這裡。</li>';
+  el.querySelectorAll('img[data-photo]').forEach(img => {
+    photoSrc(img.dataset.photo).then(src => { if (src) img.src = src; });
+  });
+  el.scrollTop = el.scrollHeight;
+}
+async function compressImage(file) {
+  const bmp = await createImageBitmap(file);
+  const max = 1280;
+  let w = bmp.width, h = bmp.height;
+  if (Math.max(w, h) > max) { const s = max / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+  const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  const tryBlob = (type, q) => new Promise(res => canvas.toBlob(res, type, q));
+  let type = 'image/webp', q = 0.82, blob = await tryBlob(type, q);
+  if (!blob) { type = 'image/jpeg'; blob = await tryBlob(type, q); }
+  while (blob && blob.size > 200 * 1024 && q > 0.4) { q -= 0.12; blob = await tryBlob(type, q); }
+  if (!blob) throw new Error('無法壓縮圖片');
+  if (blob.size > 220 * 1024) throw new Error('壓縮後仍超過 200KB');
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+  return { mime: blob.type || type, data: btoa(bin), bytes: blob.size };
+}
+async function sendChatText(text) {
+  const conv = currentConv(); if (!conv) return toast('請先選擇頻道');
+  text = String(text || '').trim(); if (!text) return;
+  const r = await fetch('/api/messages', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ conv, text }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(j.message || '送出失敗');
+  if (j.message && !S.chat.some(x => x.id === j.message.id)) { S.chat.push(j.message); renderChat(); }
+}
+async function sendChatPhoto(file) {
+  const conv = currentConv(); if (!conv) return toast('請先選擇頻道');
+  toast('壓縮照片中…');
+  let packed;
+  try { packed = await compressImage(file); } catch (e) { return toast(e.message || '無法處理照片'); }
+  const r = await fetch('/api/photos', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ conv, data: packed.data }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(j.message || '上傳失敗');
+  if (j.message && !S.chat.some(x => x.id === j.message.id)) { S.chat.push(j.message); renderChat(); }
+}
+
+
 
 // ---------- 事件 ----------
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
@@ -460,6 +543,12 @@ document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click
 $('#channelList').addEventListener('click', (e) => { const li = e.target.closest('li[data-ch]'); if (!li) return; if (li.dataset.ch === S.channel) { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); } else wsSend({ t: 'join', channel: li.dataset.ch }); });
 ['#memberList', '#otherList', '#dmList'].forEach(sel => $(sel).addEventListener('click', (e) => { const li = e.target.closest('li[data-uid]'); if (li) openDm(li.dataset.uid, li.dataset.name); }));
 $('#backToChannel').addEventListener('click', () => { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); });
+$('#chatForm').addEventListener('submit', (e) => { e.preventDefault(); const t = $('#chatInput').value; $('#chatInput').value = ''; sendChatText(t).catch(err => toast(err.message)); });
+$('#chatPhoto').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (f) sendChatPhoto(f).catch(err => toast(err.message));
+});
+$('#chatList').addEventListener('click', (e) => { if (e.target.tagName === 'IMG' && e.target.src) window.open(e.target.src, '_blank'); });
 $('#logout').addEventListener('click', async () => {
   try { await fetch('/api/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + store.token } }); } catch {}
   store.token = ''; stopLoc(); location.reload();

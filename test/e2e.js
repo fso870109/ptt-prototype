@@ -173,6 +173,34 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('私人對講（跨頻道）只有對方收到', gd.t === 'floor_granted' && C[outs.id].bin.length === 1 && C[m2.id].bin.length === 0 && C[sup.id].bin.length === 0);
     ok('私人對講以帳號身分識別', gd.conv === 'dm:' + [m1.id, outs.id].sort().join(':'));
 
+    // ===== 文字與照片 =====
+    const jpeg = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
+    C[m2.id].clear();
+    const txt = await http('POST', '/api/messages', { conv: CH, text: '你好，這是頻道文字' }, tok[m1.id]);
+    const wsChat = await C[m2.id].wait(m => m.t === 'chat' && m.message && m.message.text === '你好，這是頻道文字');
+    ok('頻道文字訊息：HTTP 建立且同頻道成員即時收到', txt.status === 201 && txt.body.message.kind === 'text' && wsChat.message.from === m1.id);
+    const chatHist = await http('GET', `/api/messages?conv=${CH}`, null, tok[lis.id]);
+    ok('只聽者可以讀取頻道文字紀錄', chatHist.status === 200 && chatHist.body.messages.some(x => x.text === '你好，這是頻道文字'));
+    const noAuth = await http('GET', `/api/messages?conv=${CH}`);
+    const outHist = await http('GET', `/api/messages?conv=${CH}`, null, tok[outs.id]);
+    ok('未登入與局外人不能讀頻道訊息', noAuth.status === 401 && outHist.status === 403);
+    const ph = await http('POST', '/api/photos', { conv: CH, data: jpeg.toString('base64') }, tok[m1.id]);
+    ok('頻道照片上傳成功', ph.status === 201 && ph.body.message.kind === 'photo' && ph.body.message.photoId, JSON.stringify(ph.body && ph.body.message));
+    const pid = ph.body.message.photoId;
+    const imgOk = await fetch(BASE + '/api/photos/' + pid, { headers: { Authorization: 'Bearer ' + tok[m2.id] } });
+    const imgNo = await fetch(BASE + '/api/photos/' + pid);
+    const imgOut = await fetch(BASE + '/api/photos/' + pid, { headers: { Authorization: 'Bearer ' + tok[outs.id] } });
+    ok('照片網址驗證登入與頻道權限（同頻道可、未登入 401、局外人 403）', imgOk.status === 200 && (imgOk.headers.get('content-type') || '').includes('jpeg') && imgNo.status === 401 && imgOut.status === 403);
+    const tooBig = await http('POST', '/api/photos', { conv: CH, data: Buffer.alloc(230 * 1024, 0xff).toString('base64') }, tok[m1.id]);
+    ok('超過約 200KB 的照片被拒絕', tooBig.status === 413 || tooBig.status === 400, 'status=' + tooBig.status);
+    const dmConv = 'dm:' + [m1.id, outs.id].sort().join(':');
+    const dmT = await http('POST', '/api/messages', { conv: dmConv, text: '私人文字' }, tok[m1.id]);
+    const dmSee = await http('GET', `/api/messages?conv=${encodeURIComponent(dmConv)}`, null, tok[outs.id]);
+    const dmHide = await http('GET', `/api/messages?conv=${encodeURIComponent(dmConv)}`, null, tok[m2.id]);
+    ok('一對一文字只有雙方能讀', dmT.status === 201 && dmSee.body.messages.some(x => x.text === '私人文字') && dmHide.status === 403);
+    const empty = await http('POST', '/api/messages', { conv: CH, text: '   ' }, tok[m1.id]);
+    ok('空白文字被拒絕', empty.status === 400);
+
     // ===== 後台操作即時生效 =====
     await http('DELETE', `/api/admin/channels/${CH}/members/${lis.id}`, null, adminTok);
     const moved = await C[lis.id].wait(m => m.t === 'joined' && m.reason === 'access_changed');
@@ -211,8 +239,8 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     if (DATA_DIR) {
       const files = walk(DATA_DIR).map(f => path.relative(DATA_DIR, f));
       const txt = fs.existsSync(path.join(DATA_DIR, 'db.json')) ? fs.readFileSync(path.join(DATA_DIR, 'db.json'), 'utf8') : '';
-      localOk = files.every(f => f === 'db.json') && !/RIFF|"lat"|"battery"|alert/.test(txt);
-      local = `data/ 只有 [${files.join(', ')}]，且沒有位置/警報/音訊`;
+      localOk = files.every(f => f === 'db.json' || f === 'chat.json' || f.startsWith('photos' + require('path').sep) || f === 'photos') && !/RIFF|WAVE/.test(txt);
+      local = `data/ 檔案 [${files.join(', ')}]，且 db.json 沒有音訊`;
     }
     ok('講完後伺服器沒有留下音訊檔／歷史（也不存位置與警報）', hist.status === 404 && wav.status === 404 && h2.body.storesAudio === false && localOk, `history→${hist.status}、audio→${wav.status}；${local}`);
     for (const c of [...Object.values(C), ADM, anon]) try { c.ws.close(); } catch {}
