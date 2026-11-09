@@ -121,6 +121,7 @@ try:
     dp.goto(BASE + '/dispatch')
     dp.fill('#username', users['調度']['username']); dp.fill('#password', users['調度']['password']); dp.click('#loginForm button')
     dp.wait_for_selector('#desk:not(.hidden)', timeout=15000)
+    dp.wait_for_function("document.querySelector('#chList') && document.querySelector('#chList').innerText.includes('大廳')", timeout=15000)
     ok('調度台桌面版顯示頻道清單、佇列與地圖', dp.is_visible('#chList') and dp.is_visible('#queueList') and dp.is_visible('#map') and '大廳' in dp.inner_text('#chList'))
     A.click('#callDispatch')
     dp.wait_for_selector('#queueList button[data-pick]', timeout=10000)
