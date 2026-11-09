@@ -353,7 +353,7 @@ async function api(req, res, p, url) {
       D().users = D().users.filter(x => x.id !== u.id); revokeSessions(u.id);
       for (const c of D().channels) delete c.members[u.id];
       locations.delete(u.id);
-      media.convsForUser(u.id).then(cs => media.deleteConvs(cs)).catch(e => console.error('[media]', e.message));
+      media.convsForUser(u.id).then(cs => media.deleteConvs(cs)).then(() => media.deleteByFrom(u.id)).catch(e => console.error('[media]', e.message));
       await store.save(); kick(u.id); online.delete(u.id); broadcastOnline();
       return json(res, 200, { ok: true });
     }
@@ -553,8 +553,9 @@ setInterval(() => {
   ensureLobby();
   await seedAdmin();
   await store.save();
-  media.cleanup().then(r => console.log('[media] cleanup', r)).catch(e => console.error('[media] cleanup', e.message));
-  setInterval(() => media.cleanup().catch(e => console.error('[media] cleanup', e.message)), 3600e3);
+  const runClean = () => media.cleanup({ validUserIds: D().users.map(u => u.id) }).then(r => console.log('[media] cleanup', r)).catch(e => console.error('[media] cleanup', e.message));
+  runClean();
+  setInterval(runClean, 3600e3);
   server.listen(PORT, () => console.log(`[ptt] listening on :${PORT} (storage=${store.kind})`));
 })().catch(e => { console.error('[ptt] startup failed', e); process.exit(1); });
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, async () => { try { await store.close(); } catch {} process.exit(0); });
