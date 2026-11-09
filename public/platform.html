@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/admin.css">
+<title>平台後台 · 一鍵對講</title>
+</head>
+<body>
+<div class="admin">
+  <header class="topbar">
+    <strong>🏢 平台後台</strong>
+    <div class="me"><span id="who"></span> <a class="link" href="/admin">公司後台</a> <a class="link" href="/">回對講</a> <button id="logout" class="link">登出</button></div>
+  </header>
+  <section id="loginBox" class="card hidden">
+    <h2>平台管理員登入</h2>
+    <p class="muted small">請用平台代碼（預設 PLATFORM）與平台管理員帳號登入。</p>
+    <form id="loginForm">
+      <input id="org" placeholder="平台代碼" autocomplete="organization" autocapitalize="characters">
+      <input id="username" placeholder="帳號" autocomplete="username" autocapitalize="none">
+      <input id="password" type="password" placeholder="密碼" autocomplete="current-password">
+      <button class="primary" type="submit">登入</button>
+      <p id="loginErr" class="err"></p>
+    </form>
+  </section>
+  <section id="denied" class="card hidden"><h2>需要平台管理員權限</h2><p>此頁只有平台管理員可以使用。公司管理員請到 <a href="/admin">公司後台</a>。</p></section>
+  <div id="panels" class="hidden">
+    <section class="card">
+      <h2>方案與範例金額</h2>
+      <p class="notice">以下金額是<strong>可調整的範例佔位值</strong>，不是正式報價。本原型<b>沒有</b>接綠界、Stripe 或其他需要商店帳號的真實金流；客戶付款後請在下方「標記已付款」。</p>
+      <div id="planBox"></div>
+    </section>
+    <section class="card">
+      <h2>建立公司</h2>
+      <form id="newOrg" class="grid-form">
+        <input id="noCode" placeholder="公司代碼（2–16 位英數字）" required maxlength="16" autocapitalize="characters">
+        <input id="noName" placeholder="公司名稱" required>
+        <select id="noPlan"><option value="free">免費</option><option value="standard">標準（範例）</option><option value="pro">專業（範例）</option></select>
+        <input id="noAdmin" placeholder="公司管理員帳號" required autocapitalize="none">
+        <input id="noAdminName" placeholder="管理員顯示名稱">
+        <input id="noAdminPw" type="text" placeholder="管理員密碼（留空自動產生）">
+        <button class="primary" type="submit">建立公司</button>
+      </form>
+      <p id="newPw" class="notice hidden"></p>
+    </section>
+    <section class="card">
+      <h2>公司一覽</h2>
+      <div id="orgCards"></div>
+    </section>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script src="/platform.js"></script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 // 最小 Service Worker：讓 PWA 可安裝；採 network-first，避免舊版快取
-const C = 'ptt-v5';
+const C = 'ptt-v6';
 const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(C).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));

@@ -28,12 +28,15 @@
     return j;
   }
 
+  if ($('org') && localStorage.getItem('ptt_org')) $('org').value = localStorage.getItem('ptt_org');
   $('loginForm').onsubmit = async (e) => {
     e.preventDefault(); $('loginErr').textContent = '';
     try {
-      const j = await post('/api/login', { username: $('username').value.trim(), password: $('password').value });
+      const org = ($('org') && $('org').value.trim()) || localStorage.getItem('ptt_org') || '';
+      if (org) localStorage.setItem('ptt_org', org);
+      const j = await post('/api/login', { username: $('username').value.trim(), password: $('password').value, org });
       token = j.token; localStorage.setItem('ptt_token', token);
-      if (j.user.role !== 'admin' && j.user.role !== 'dispatcher') { $('loginBox').classList.add('hidden'); $('denied').classList.remove('hidden'); return; }
+      if (j.user.role !== 'admin' && j.user.role !== 'org_admin' && j.user.role !== 'dispatcher') { $('loginBox').classList.add('hidden'); $('denied').classList.remove('hidden'); return; }
       boot(j.user);
     } catch (err) { $('loginErr').textContent = err.message; }
   };
@@ -43,7 +46,7 @@
 
   if (token) {
     fetch('/api/me', { headers: { authorization: 'Bearer ' + token } }).then(r => r.ok ? r.json() : Promise.reject()).then(j => {
-      if (j.user.role !== 'admin' && j.user.role !== 'dispatcher') { $('loginBox').classList.add('hidden'); $('denied').classList.remove('hidden'); return; }
+      if (j.user.role !== 'admin' && j.user.role !== 'org_admin' && j.user.role !== 'dispatcher') { $('loginBox').classList.add('hidden'); $('denied').classList.remove('hidden'); return; }
       boot(j.user);
     }).catch(() => { token = ''; localStorage.removeItem('ptt_token'); });
   }
@@ -54,7 +57,7 @@
     $('denied').classList.add('hidden');
     $('desk').classList.remove('hidden');
     $('who').textContent = user.displayName + ' · ' + user.role;
-    if (user.role !== 'admin') $('adminLink').classList.add('hidden');
+    if (user.role !== 'admin' && user.role !== 'org_admin') $('adminLink').classList.add('hidden');
     if (!map) {
       map = L.map('map').setView([23.97, 120.98], 7);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', maxZoom: 19 }).addTo(map);

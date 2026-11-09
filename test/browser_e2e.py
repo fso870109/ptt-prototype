@@ -12,7 +12,7 @@ def api(method, path, body=None, token=None):
         with urllib.request.urlopen(req) as r: return r.status, json.loads(r.read() or b'{}')
     except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
 sfx = hex(int(time.time()))[-5:]
-_, j = api('POST', '/api/login', {'username': AU, 'password': AP}); ADM = j['token']
+_, j = api('POST', '/api/login', {'username': AU, 'password': AP, 'org': 'DEMO'}); ADM = j['token']
 users = {}
 for key, name in [('ba', '小明'), ('bb', '小華')]:
     s, j = api('POST', '/api/admin/users', {'username': f't_{key}_{sfx}', 'displayName': name, 'password': f'{key}-Pass-1234'}, ADM)
@@ -35,11 +35,11 @@ try:
         pages[name] = pg
     A, B = pages['小明'], pages['小華']
     # 登入
-    A.fill('#username', users['小明']['username']); A.fill('#password', 'wrong-password'); A.click('#enter')
+    A.fill('#org', 'DEMO'); A.fill('#username', users['小明']['username']); A.fill('#password', 'wrong-password'); A.click('#enter')
     A.wait_for_function("document.querySelector('#loginErr').textContent.length > 0", timeout=8000)
     ok('錯誤密碼顯示錯誤訊息、不能進入', '錯誤' in A.inner_text('#loginErr') and A.is_hidden('#main'), A.inner_text('#loginErr'))
     for name, pg in pages.items():
-        pg.fill('#username', users[name]['username']); pg.fill('#password', users[name]['password']); pg.click('#enter')
+        pg.fill('#org', 'DEMO'); pg.fill('#username', users[name]['username']); pg.fill('#password', users[name]['password']); pg.click('#enter')
         pg.wait_for_selector('#connText:has-text("已連線")', timeout=15000)
     ok('兩個帳號用帳密登入成功', True)
     time.sleep(1)
@@ -100,7 +100,7 @@ try:
     ok('B 播放警示音', siren)
     # 管理員從後台解除
     actx = b.new_context(viewport={'width': 1100, 'height': 900}); ap = actx.new_page(); ap.on('dialog', lambda d: d.accept())
-    ap.goto(BASE + '/admin'); ap.fill('#username', AU); ap.fill('#password', AP); ap.click('#loginForm button')
+    ap.goto(BASE + '/admin'); ap.fill('#org', 'DEMO'); ap.fill('#username', AU); ap.fill('#password', AP); ap.click('#loginForm button')
     ap.wait_for_selector('#panels:not(.hidden)', timeout=10000)
     ap.wait_for_selector('#alertList button[data-resolve]', timeout=10000)
     ok('後台看到進行中的警報', '小明' in ap.inner_text('#alertList'))
@@ -119,7 +119,7 @@ try:
     dctx = b.new_context(permissions=['microphone'], viewport={'width': 1440, 'height': 900})
     dp = dctx.new_page(); dp.on('dialog', lambda d: d.accept())
     dp.goto(BASE + '/dispatch')
-    dp.fill('#username', users['調度']['username']); dp.fill('#password', users['調度']['password']); dp.click('#loginForm button')
+    dp.fill('#org', 'DEMO'); dp.fill('#username', users['調度']['username']); dp.fill('#password', users['調度']['password']); dp.click('#loginForm button')
     dp.wait_for_selector('#desk:not(.hidden)', timeout=15000)
     dp.wait_for_function("document.querySelector('#chList') && document.querySelector('#chList').innerText.includes('大廳')", timeout=15000)
     ok('調度台桌面版顯示頻道清單、佇列與地圖', dp.is_visible('#chList') and dp.is_visible('#queueList') and dp.is_visible('#map') and '大廳' in dp.inner_text('#chList'))

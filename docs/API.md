@@ -36,9 +36,10 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 
 | 值 | 說明 |
 |---|---|
-| `admin` | 管理員。可使用 `/admin`、`/dispatch` 與所有 `/api/admin/*`。在未個別指派的頻道預設為「主管」。可見全體位置與警報。 |
-| `dispatcher` | 調度員。可使用 `/dispatch` 同時監聽多頻道、處理來電佇列。不可使用 `/api/admin/*`。在未個別指派的頻道預設為「主管」。可見全體位置與警報，可解除警報。 |
-| `user` | 一般使用者。可按「呼叫調度台」進入共用佇列。 |
+| `admin` | 平台管理員。可使用 `/platform` 與所有 `/api/platform/*`。用公司代碼登入後也可使用該公司的 `/admin`、`/dispatch` 與 `/api/admin/*`。在該公司未個別指派的頻道預設為「主管」。可見該公司全體位置與警報。帳號本身不屬於任何一家公司（`orgId` 為 `null`）。 |
+| `org_admin` | 公司管理員。可使用該公司的 `/admin`、`/dispatch` 與 `/api/admin/*`，不可使用 `/api/platform/*`。在該公司未個別指派的頻道預設為「主管」。可見該公司全體位置與警報。 |
+| `dispatcher` | 調度員。可使用該公司的 `/dispatch` 同時監聽多頻道、處理來電佇列。不可使用 `/api/admin/*`。在未個別指派的頻道預設為「主管」。可見該公司全體位置與警報，可解除警報。 |
+| `user` | 一般使用者。可按「呼叫調度台」進入該公司共用佇列。 |
 
 **頻道角色**（每個頻道、每位成員一份）
 
@@ -76,35 +77,68 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
   "photoBytes": 0,
   "photoRetentionDays": 7,
   "photoQuotaBytes": 314572800,
+  "orgs": 1,
   "dispatchQueue": 0
 }
 ```
 
 - `storage`：`postgres` 或 `json`（本機無 `DATABASE_URL` 時）
 - `storesAudio` 永遠為 `false`
+- `orgs`：公司數量（含預設公司）
 - `dispatchQueue`：記憶體中尚未結束的調度台呼叫數（含等候中與進行中）
+- `online`／`channels`／`users` 目前是全站合計（原型洩漏，正式環境不應公開）
 
 ### 2.2 `POST /api/login`
+原生 App **必須**提供公司代碼，欄位名用 `org` 或 `orgCode` 都可以：
+
 ```json
-{ "username": "alice", "password": "********" }
+{ "username": "alice", "password": "********", "org": "DEMO" }
 ```
-成功 `200`：`{ "token": "...", "user": { "id", "username", "displayName", "role", "disabled", "createdAt" } }`
+
+- `org`／`orgCode`：2–16 位英數字（不分大小寫，伺服器會轉成大寫）。缺少時回 `400 need_org`。
+- 預設公司代碼為 `DEMO`（由既有資料遷移而來）。
+- 平台管理員另可用平台代碼登入（預設 `PLATFORM`，可用環境變數 `PLATFORM_ORG_CODE` 覆寫）。此時回應的 `org` 為 `null`，只能操作 `/api/platform/*`；要管理某一公司請改用該公司代碼登入（同一個平台管理員帳號）。
+- 帳號名稱在**同一公司內**唯一；不同公司可以有相同的 `username`。
+
+成功 `200`：
+
+```json
+{
+  "token": "...",
+  "user": { "id": "u…", "username": "alice", "displayName": "小明", "role": "user", "orgId": "odefault", "disabled": false, "createdAt": 1731200000000 },
+  "org": {
+    "id": "odefault",
+    "code": "DEMO",
+    "name": "預設公司",
+    "plan": "free",
+    "seatLimit": 10,
+    "seatsUsed": 3,
+    "expiresAt": null,
+    "disabled": false,
+    "status": "active",
+    "settings": { "saveCaptions": false }
+  }
+}
+```
 
 失敗：
 
 | 狀態 | error | 說明 |
 |---|---|---|
-| 401 | `invalid_credentials` | 帳號或密碼錯誤 |
+| 400 | `need_org` | 未提供公司代碼 |
+| 401 | `invalid_credentials` | 帳號、密碼或公司代碼錯誤（不區分「沒有這家公司」以免探測） |
 | 403 | `disabled` | 帳號已停用 |
+| 403 | `org_disabled` | 此公司已被停用 |
+| 403 | `org_expired` | 此公司方案已到期 |
 | 429 | `too_many_attempts` | 嘗試過多 |
 
-帳號規則：3–32 字元，`[a-zA-Z0-9_.-]`。密碼至少 8 字元（建立時）。
+帳號規則：3–32 字元，`[a-zA-Z0-9_.-]`。密碼至少 8 字元（建立時）。公司代碼：2–16 位 `[A-Z0-9]`。
 
 ### 2.3 `POST /api/logout`
 撤銷**目前這個** token。`200 { "ok": true }`
 
 ### 2.4 `GET /api/me`
-`{ "user": { ... }, "channels": [ /* 見 welcome.channels */ ] }`
+`{ "user": { ..., "orgId" }, "channels": [ /* 見 welcome.channels */ ], "org": { /* 同 login.org；平台代碼登入時為 null */ } }`
 
 ### 2.5 `POST /api/me/password`
 ```json
@@ -137,29 +171,72 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 
 - `battery`：0–100 的整數；未知為 `null`（iOS Safari 不支援 Battery Status API）
 - `acc`：定位誤差公尺，可能為 `null`
-- 可見範圍：自己；管理員與調度員看全體；一般成員只看**目前與自己在同一頻道**的人
+- 可見範圍：限同一公司。自己；該公司的平台／公司管理員與調度員看全體；一般成員只看**目前與自己在同一頻道**的人
 
 ### 2.7 `GET /api/alerts`
-進行中、呼叫者可見的警報（管理員與調度員看全部；一般成員看自己發的＋目前同頻道的）。格式見 WebSocket `alert`。
+進行中、呼叫者可見的警報（限同一公司：管理員與調度員看全部；一般成員看自己發的＋目前同頻道的）。格式見 WebSocket `alert`。
 
-### 2.8 管理後台（需 `user.role === "admin"`，否則 `403 forbidden`）
+### 2.8 公司後台（需已進入某一公司的 `admin` 或 `org_admin`，否則 `403 forbidden`；平台管理員若用 `PLATFORM` 登入則回 `400 need_org`）
+
+所有清單與操作都只作用於**目前 token 所屬公司**。
 
 | 方法 | 路徑 | 說明 |
 |---|---|---|
-| GET | `/api/admin/users` | 所有使用者（含 `online`、`channel`） |
-| POST | `/api/admin/users` | 建立。body：`username`（必填）、`displayName`、`password`（省略則自動產生，回應裡只出現一次）、`role`：`admin` 或 `user`。成功 `201` |
-| PATCH | `/api/admin/users/:id` | `displayName`、`role`、`disabled`、`password` 或 `resetPassword: true`（自動產生新密碼） |
-| DELETE | `/api/admin/users/:id` | 刪除（不能刪自己） |
-| GET | `/api/admin/channels` | 頻道清單與成員角色 |
-| POST | `/api/admin/channels` | `{ "name", "open" }` |
+| GET | `/api/admin/users` | 本公司使用者（含 `online`、`channel`） |
+| POST | `/api/admin/users` | 建立。body：`username`（必填）、`displayName`、`password`（省略則自動產生，回應裡只出現一次）、`role`：`user`／`dispatcher`／`org_admin`。不可建立平台管理員。超過公司座位數回 `403 seat_limit`。成功 `201` |
+| PATCH | `/api/admin/users/:id` | `displayName`、`role`（同上，不可設為 `admin`）、`disabled`、`password` 或 `resetPassword: true`（自動產生新密碼） |
+| DELETE | `/api/admin/users/:id` | 刪除（不能刪自己；不能刪其他公司的人） |
+| GET | `/api/admin/channels` | 本公司頻道清單與成員角色 |
+| POST | `/api/admin/channels` | `{ "name", "open" }`（名稱在同一公司內唯一） |
 | PATCH | `/api/admin/channels/:id` | `{ "name", "open" }` |
-| DELETE | `/api/admin/channels/:id` | 不能刪「大廳」（id=`lobby`） |
-| PUT | `/api/admin/channels/:id/members/:userId` | `{ "role": "supervisor"\|"member"\|"listener" }` |
+| DELETE | `/api/admin/channels/:id` | 不能刪大廳（預設公司 id=`lobby`，其他公司為 `lobby-<orgId>`） |
+| PUT | `/api/admin/channels/:id/members/:userId` | `{ "role": "supervisor" / "member" / "listener" }` |
 | DELETE | `/api/admin/channels/:id/members/:userId` | 移除指派 |
-| GET | `/api/admin/alerts` | 全部進行中警報 |
+| GET | `/api/admin/alerts` | 本公司進行中警報 |
 | POST | `/api/admin/alerts/:id/resolve` | 解除警報 |
+| GET | `/api/admin/settings` | `{ "settings": { "saveCaptions": false }, "org": { ... } }` |
+| PATCH | `/api/admin/settings` | `{ "saveCaptions": true 或 false }`（公司管理員可開關；即時語音轉文字若開啟會用到） |
 
 管理員不能停用自己或移除自己的管理員權限（`400 self_lockout`）。停用／重設密碼會立即踢下線。
+
+### 2.8.1 平台後台（需 `user.role === "admin"`，否則 `403 forbidden`）
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/api/platform/plans` | 方案與範例金額（`example: true`） |
+| PATCH | `/api/platform/plans` | 調整 `free`／`standard`／`pro` 的 `label`、`seats`、`priceMonthly`、`priceYearly`。金額永遠標 `example: true` |
+| GET | `/api/platform/orgs` | 公司一覽、方案、`platformCode` |
+| POST | `/api/platform/orgs` | 建立公司。body：`code`、`name`、`plan`（`free`／`standard`／`pro`）、可選 `seatLimit`、`adminUsername`、`adminDisplayName`、`adminPassword`。付費方案預設 14 天試用 |
+| GET | `/api/platform/orgs/:id` | 單一公司與該公司使用者 |
+| PATCH | `/api/platform/orgs/:id` | `name`、`code`、`plan`、`seatLimit`、`expiresAt`、`disabled`、`settings.saveCaptions`。停用會立即踢該公司所有人 |
+| DELETE | `/api/platform/orgs/:id` | 刪除公司及其使用者、頻道、訊息。預設公司 `odefault` 不能刪（`400 protected`） |
+| POST | `/api/platform/orgs/:id/mark-paid` | `{ "days": 30, "note": "..." }` 手動延長到期日並解除停用。**不會向任何金流請款** |
+| POST | `/api/platform/orgs/:id/admins` | 再指定一位公司管理員 |
+
+頁面：`GET /platform`。
+
+### 2.8.2 `POST /api/billing/checkout`
+
+需登入。本原型**沒有**接綠界、Stripe 或其他真實金流，固定回 `200`：
+
+```json
+{
+  "ok": false,
+  "error": "not_connected",
+  "example": true,
+  "message": "尚未接上真實金流……",
+  "provider": null,
+  "orgId": "o…",
+  "orgCode": "DEMO",
+  "plan": "standard",
+  "period": "monthly",
+  "amount": 990,
+  "currency": "TWD",
+  "note": "範例佔位金額，非正式報價"
+}
+```
+
+body 可帶 `plan`、`period`（`monthly`／`yearly`）。若要自行串接金流，請實作 `createCheckout`／`handleWebhook` 取代 `lib/billing.js` 的佔位函式。客戶若已另外付款，由平台管理員呼叫 `mark-paid`。
 
 ### 2.9 不存在的路徑
 - `/api/history`、`/audio/*` → `404`（不保存錄音）
@@ -307,7 +384,8 @@ wss://<host>/ws
 ```json
 {
   "t": "welcome",
-  "user": { "id": "u…", "username": "alice", "displayName": "小明", "role": "user", "disabled": false, "createdAt": 1731200000000 },
+  "user": { "id": "u…", "username": "alice", "displayName": "小明", "role": "user", "orgId": "odefault", "disabled": false, "createdAt": 1731200000000 },
+  "org": { "id": "odefault", "code": "DEMO", "name": "預設公司", "plan": "free", "status": "active", "settings": { "saveCaptions": false } },
   "channels": [
     {
       "id": "lobby",
@@ -342,7 +420,7 @@ wss://<host>/ws
 ```json
 { "t": "auth_failed", "reason": "invalid_token" }
 ```
-`reason`：`invalid_token` | `not_logged_in` | `revoked`。隨後連線會關閉。
+`reason`：`invalid_token` | `not_logged_in` | `revoked` | `org_inactive`（公司停用或到期）。隨後連線會關閉（代碼 `4003`）。
 
 #### `joined`
 ```json
@@ -643,11 +721,19 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 
 ---
 
-## 9. 多租戶（公司隔離）
+## 9. 多租戶（公司隔離）與收費佔位
 
-> 規劃中。預計登入時額外帶「公司代碼」；各公司的使用者、頻道、地圖、警報、訊息完全隔離。  
-> 平台管理員（目前的 `admin`）可建立／停用公司。現有資料會遷到一個預設公司。  
-> 實作後 `user` 物件與 `login` 請求會增加對應欄位，本文件會同步更新。
+已實作。各公司的使用者、頻道、地圖位置、警報、文字／照片、調度佇列完全隔離。
+
+- 預設公司：`id = odefault`，代碼 `DEMO`。升級既有資料庫時，非平台管理員的使用者與頻道會自動加上 `orgId: "odefault"`。預設公司大廳 id 仍為 `lobby`，其他公司大廳為 `lobby-<orgId>`。
+- 登入請求見 §2.2，原生 App 必須有公司代碼欄位（`org` 或 `orgCode`）。
+- `user.orgId`：一般帳號為所屬公司；平台管理員為目前 session 進入的公司，若用 `PLATFORM` 登入則為 `null`。
+- 方案預設（皆 `example: true`，可在平台後台改，非正式報價）：免費 0 元／10 人；標準月 990／年 9900、50 人；專業月 2990／年 29900、200 人（TWD）。
+- 座位數：該公司未停用的帳號數不可超過 `seatLimit`。
+- 到期：`expiresAt` 為過去時間時無法登入（`org_expired`），線上連線會在下次訊息或最多約 30 秒內被踢。免費方案預設 `expiresAt: null`。
+- 停用公司：`403 org_disabled`，並立即踢下線。
+- 金流：見 §2.8.2。沒有綠界／Stripe／自動續約；「標記已付款」只是延長到期日的佔位操作。
+- 限制：照片 300MB 配額目前全站共用，尚未依公司分開計算。`GET /api/health` 的人數／頻道數為全站合計。
 
 ---
 
@@ -655,9 +741,9 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 
 | 狀態 | 典型 error |
 |---|---|
-| 400 | `bad_request` `bad_username` `bad_name` `bad_role` `weak_password` `wrong_password` `self_lockout` `protected` |
+| 400 | `bad_request` `bad_username` `bad_name` `bad_org` `bad_role` `weak_password` `wrong_password` `self_lockout` `protected` `need_org` |
 | 401 | `unauthorized` `invalid_credentials` |
-| 403 | `forbidden` `disabled` |
+| 403 | `forbidden` `disabled` `org_disabled` `org_expired` `seat_limit` |
 | 404 | `not_found` `no_user` |
 | 409 | `exists` |
 | 429 | `too_many_attempts` |
@@ -667,7 +753,7 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 
 ## 11. 原生 App 實作清單（建議順序）
 
-1. 登入、保存 token、`GET /api/me`
+1. 登入畫面要有**公司代碼**欄位，呼叫 `POST /api/login` 時送 `{ username, password, org }`（也接受 `orgCode`），保存 token 與公司代碼，再呼叫 `GET /api/me` 確認 `org`
 2. 連 `/ws`，`hello` → 處理 `welcome` / `auth_failed`，斷線重連
 3. `join` 頻道、畫成員清單
 4. 按住講話：`ptt_start` → 等 `floor_granted` → 擷取麥克風轉 16 kHz s16le mono 分片送出 → 放開 `ptt_stop`；處理 `floor_denied` / `floor_revoked`
@@ -677,6 +763,7 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 8. 長按防誤觸後 `alert_start`；全螢幕顯示 `alert`
 9. 文字／照片：`GET/POST /api/messages`、`POST /api/photos`、`GET /api/photos/:id`（帶 Bearer，不要把 token 放進 URL）
 10. 若要做調度功能：`listen`、顯示 `queue`、`dispatch_call` / `dispatch_pickup` / `dispatch_transfer` / `dispatch_done`
-11. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
+11. 若要做多公司：保存上次使用的公司代碼；處理 `need_org`／`org_disabled`／`org_expired`／`seat_limit`；公司管理員走 `/api/admin/*`，平台管理員另接 `/api/platform/*` 與佔位的 `/api/billing/checkout`（不要當成真實付款成功）
+12. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
 
 背景限制與音訊解鎖細節見專案根目錄 `README.md`。

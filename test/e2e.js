@@ -15,7 +15,7 @@ async function http(method, p, body, token) {
   let j = null; try { j = await r.json(); } catch {}
   return { status: r.status, body: j };
 }
-const login = async (u, p) => (await http('POST', '/api/login', { username: u, password: p })).body?.token;
+const login = async (u, p, org = 'DEMO') => (await http('POST', '/api/login', { username: u, password: p, org })).body?.token;
 function client(token, label) {
   return new Promise((res) => {
     const ws = new WebSocket(WSURL); const c = { ws, label, msgs: [], bin: [], closed: null };
@@ -41,7 +41,7 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
 
 (async () => {
   const sfx = Date.now().toString(36).slice(-5);
-  const created = { users: [], channels: [] };
+  const created = { users: [], channels: [], orgs: [] };
   let adminTok;
   try {
     const h = await http('GET', '/api/health');
@@ -51,11 +51,12 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     const anon = await client('not-a-token', 'anon');
     ok('未登入（無效 token）的 WebSocket 被拒絕', anon.has(m => m.t === 'auth_failed') && !anon.has(m => m.t === 'welcome'));
     ok('未登入呼叫 API 回 401', (await http('GET', '/api/admin/users')).status === 401 && (await http('GET', '/api/locations')).status === 401 && (await http('GET', '/api/me')).status === 401);
-    ok('錯誤密碼登入失敗', (await http('POST', '/api/login', { username: ADMIN_U, password: ADMIN_P + 'x' })).status === 401);
+    ok('錯誤密碼登入失敗', (await http('POST', '/api/login', { username: ADMIN_U, password: ADMIN_P + 'x', org: 'DEMO' })).status === 401);
     adminTok = await login(ADMIN_U, ADMIN_P);
     ok('管理員登入成功', !!adminTok);
     const meA = await http('GET', '/api/me', null, adminTok);
     ok('管理員身分為 admin', meA.body?.user?.role === 'admin');
+    ok('管理員以 DEMO 登入會帶公司資料', meA.body?.org?.code === 'DEMO');
 
     // ===== 後台：建立使用者與頻道、指派角色 =====
     const mk = async (key, name, password, role) => {
@@ -266,7 +267,7 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     const moved = await C[lis.id].wait(m => m.t === 'joined' && m.reason === 'access_changed');
     ok('移除頻道成員 → 立即被移回大廳', moved.channel === 'lobby');
     const dis = await http('PATCH', `/api/admin/users/${m2.id}`, { disabled: true }, adminTok);
-    const cl2 = await waitClosed(C[m2.id]); const lg2 = (await http('POST', '/api/login', { username: m2.username, password: m2.password })).status;
+    const cl2 = await waitClosed(C[m2.id]); const lg2 = (await http('POST', '/api/login', { username: m2.username, password: m2.password, org: 'DEMO' })).status;
     const on2 = await isOnlineAdm(adminTok, m2.id);
     ok('停用使用者 → 立即被踢下線（收到 auth_failed、伺服器標為離線），且無法再登入', dis.status === 200 && C[m2.id].has(m => m.t === 'auth_failed') && on2 === false && lg2 === 403, `auth_failed=${C[m2.id].has(m => m.t === 'auth_failed')} 伺服器在線=${on2} close=${cl2} login=${lg2}`);
     const offDm = await talk(C[m1.id], undefined, 0, { to: m2.id });
@@ -292,6 +293,66 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     const t1 = Date.now(); const rel = await supC.wait(m => m.t === 'talk_end' && (m.reason === 'disconnect' || m.reason === 'stalled'), 25000);
     ok('講話者斷線時伺服器自動釋放發言權', gl.t === 'floor_granted' && !!rel, `原因=${rel.reason}，${Date.now() - t1}ms`);
 
+
+    // ===== 多公司隔離與收費佔位 =====
+    const platHtml = await fetch(BASE + '/platform');
+    ok('/platform 頁面可開啟', platHtml.status === 200 && (await platHtml.text()).includes('平台後台'));
+    const noOrg = await http('POST', '/api/login', { username: ADMIN_U, password: ADMIN_P });
+    ok('登入未帶公司代碼回 400 need_org', noOrg.status === 400 && noOrg.body.error === 'need_org');
+    const platLogin = await http('POST', '/api/login', { username: ADMIN_U, password: ADMIN_P, org: 'PLATFORM' });
+    ok('平台管理員可用 PLATFORM 代碼登入', platLogin.status === 200 && platLogin.body.user.role === 'admin' && !platLogin.body.org);
+    const platTok = platLogin.body.token;
+    ok('PLATFORM 範圍不能直接呼叫公司後台', (await http('GET', '/api/admin/users', null, platTok)).status === 400);
+    const plans = await http('GET', '/api/platform/plans', null, adminTok);
+    ok('方案金額標示為範例佔位', plans.status === 200 && plans.body.example === true && plans.body.plans.standard.example === true && plans.body.plans.standard.priceMonthly === 990);
+    const orgCode = ('T' + sfx).toUpperCase();
+    const orgC = await http('POST', '/api/platform/orgs', { code: orgCode, name: `測試公司-${sfx}`, plan: 'standard', seatLimit: 1, adminUsername: `t_oa_${sfx}`, adminDisplayName: '公司管甲', adminPassword: 'Oa-pass-123' }, adminTok);
+    if (orgC.body && orgC.body.org) created.orgs.push(orgC.body.org.id);
+    ok('平台可建立公司並指定公司管理員', orgC.status === 201 && orgC.body.org && orgC.body.org.code === orgCode && orgC.body.admin.role === 'org_admin', JSON.stringify(orgC.body && orgC.body.org));
+    const ORG = orgC.body && orgC.body.org;
+    const oaTok = ORG ? await login(`t_oa_${sfx}`, 'Oa-pass-123', orgCode) : null;
+    ok('公司管理員用該公司代碼登入', !!oaTok);
+    ok('公司管理員不能進平台後台 API', oaTok ? (await http('GET', '/api/platform/orgs', null, oaTok)).status === 403 : false);
+    const seatDenied = oaTok ? await http('POST', '/api/admin/users', { username: `t_x2_${sfx}`, password: 'Xx-pass-123' }, oaTok) : { status: 0, body: {} };
+    ok('超過座位數不能再建立帳號', seatDenied.status === 403 && seatDenied.body.error === 'seat_limit');
+    const seatUp = ORG ? await http('PATCH', `/api/platform/orgs/${ORG.id}`, { seatLimit: 5 }, adminTok) : { status: 0, body: {} };
+    ok('平台可調整公司座位數', seatUp.status === 200 && seatUp.body.org && seatUp.body.org.seatLimit === 5);
+    const sameName = `t_same_${sfx}`;
+    const demoTwin = await http('POST', '/api/admin/users', { username: sameName, displayName: '同名甲', password: 'Same-pass-123' }, adminTok);
+    if (demoTwin.body && demoTwin.body.user) created.users.push(demoTwin.body.user.id);
+    const otherTwin = oaTok ? await http('POST', '/api/admin/users', { username: sameName, displayName: '同名乙', password: 'Othr-pass-123' }, oaTok) : { status: 0, body: {} };
+    ok('不同公司可以使用相同帳號名稱', demoTwin.status === 201 && otherTwin.status === 201 && demoTwin.body.user.id !== otherTwin.body.user.id);
+    const tokDemoSame = await login(sameName, 'Same-pass-123', 'DEMO');
+    const tokOtherSame = otherTwin.status === 201 ? await login(sameName, 'Othr-pass-123', orgCode) : null;
+    const crossLogin = await http('POST', '/api/login', { username: sameName, password: 'Same-pass-123', org: orgCode });
+    ok('同名帳號在錯誤公司代碼下無法登入', !!tokDemoSame && !!tokOtherSame && crossLogin.status === 401);
+    const otherLobby = ORG ? ('lobby-' + ORG.id) : 'lobby-missing';
+    const leakChat = tokDemoSame ? await http('POST', '/api/messages', { conv: otherLobby, text: '不該送到別家' }, tokDemoSame) : { status: 0 };
+    const leakRead = tokDemoSame ? await http('GET', `/api/messages?conv=${encodeURIComponent(otherLobby)}`, null, tokDemoSame) : { status: 0 };
+    ok('不能對另一家公司的大廳傳訊或讀取', leakChat.status === 403 && leakRead.status === 403);
+    const demoLobbyRead = tokOtherSame ? await http('GET', '/api/messages?conv=lobby', null, tokOtherSame) : { status: 0 };
+    ok('另一家公司讀不到預設公司大廳訊息', demoLobbyRead.status === 403);
+    const Cdemo = tokDemoSame ? await client(tokDemoSame, 'demoSame') : { has: () => false, msgs: [], ws: { close() {} } };
+    const Coth = tokOtherSame ? await client(tokOtherSame, 'otherSame') : { has: () => false, msgs: [], ws: { close() {} } };
+    ok('兩家公司的同名帳號各自 WebSocket 登入', Cdemo.has(m => m.t === 'welcome' && m.org && m.org.code === 'DEMO') && Coth.has(m => m.t === 'welcome' && m.org && m.org.code === orgCode));
+    const crossDm = tokDemoSame && otherTwin.body && otherTwin.body.user ? await talk(Cdemo, undefined, 0, { to: otherTwin.body.user.id }) : { t: 'nope' };
+    ok('跨公司一對一對講被拒', crossDm.t === 'floor_denied');
+    const onlineDemo = ((Cdemo.msgs || []).find(m => m.t === 'welcome') || {}).online || [];
+    ok('線上名單不含另一家公司的人', !onlineDemo.some(x => otherTwin.body && otherTwin.body.user && x.id === otherTwin.body.user.id));
+    const checkout = oaTok ? await http('POST', '/api/billing/checkout', { plan: 'standard', period: 'monthly' }, oaTok) : { status: 0, body: {} };
+    ok('結帳為未接金流的佔位回應', checkout.status === 200 && checkout.body.ok === false && checkout.body.error === 'not_connected' && checkout.body.example === true && checkout.body.amount === 990);
+    const expire = ORG ? await http('PATCH', `/api/platform/orgs/${ORG.id}`, { expiresAt: Date.now() - 1000 }, adminTok) : { status: 0 };
+    const expLogin = await http('POST', '/api/login', { username: `t_oa_${sfx}`, password: 'Oa-pass-123', org: orgCode });
+    ok('方案到期後無法登入', expire.status === 200 && expLogin.status === 403 && expLogin.body.error === 'org_expired');
+    const paid = ORG ? await http('POST', `/api/platform/orgs/${ORG.id}/mark-paid`, { days: 30, note: 'e2e 佔位' }, adminTok) : { status: 0, body: {} };
+    const paidLogin = await http('POST', '/api/login', { username: `t_oa_${sfx}`, password: 'Oa-pass-123', org: orgCode });
+    ok('標記已付款後可再登入（未經過真實金流）', paid.status === 200 && paid.body.org && paid.body.org.billing && paid.body.org.billing.example === true && paidLogin.status === 200);
+    const disOrg = ORG ? await http('PATCH', `/api/platform/orgs/${ORG.id}`, { disabled: true }, adminTok) : { status: 0 };
+    const disLogin = await http('POST', '/api/login', { username: `t_oa_${sfx}`, password: 'Oa-pass-123', org: orgCode });
+    ok('停用公司後無法登入', disOrg.status === 200 && disLogin.status === 403 && disLogin.body.error === 'org_disabled');
+    ok('預設公司不能刪除', (await http('DELETE', '/api/platform/orgs/odefault', null, adminTok)).status === 400);
+    try { Cdemo.ws.close(); Coth.ws.close(); } catch {}
+
     // ===== 不保存錄音 =====
     const hist = await http('GET', '/api/history?conv=lobby', null, adminTok), wav = await fetch(BASE + '/audio/0123456789abcdef.wav');
     const h2 = await http('GET', '/api/health');
@@ -311,10 +372,16 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     if (adminTok) {
       for (const id of created.channels) await http('DELETE', `/api/admin/channels/${id}`, null, adminTok);
       for (const id of created.users) await http('DELETE', `/api/admin/users/${id}`, null, adminTok);
+      for (const id of created.orgs) await http('DELETE', `/api/platform/orgs/${id}`, null, adminTok);
       const us = await http('GET', '/api/admin/users', null, adminTok), cs = await http('GET', '/api/admin/channels', null, adminTok);
+      const og = await http('GET', '/api/platform/orgs', null, adminTok);
       const left = us.body.users.filter(u => u.username.startsWith('t_') && u.username.endsWith(sfx)), leftC = cs.body.channels.filter(c => c.name.endsWith(sfx));
+      const leftO = (og.body.orgs || []).filter(o => (o.code || '').includes(sfx.toUpperCase()) || (o.name || '').includes(sfx));
+      for (const o of leftO) await http('DELETE', `/api/platform/orgs/${o.id}`, null, adminTok);
+      const og2 = await http('GET', '/api/platform/orgs', null, adminTok);
+      const leftO2 = (og2.body.orgs || []).filter(o => (o.code || '').includes(sfx.toUpperCase()) || (o.name || '').includes(sfx));
       await http('POST', '/api/logout', {}, adminTok);
-      ok('清理：本次測試帳號與頻道已刪除', !left.length && !leftC.length, `剩下使用者 ${us.body.users.map(u => u.username).join(',')}；頻道 ${cs.body.channels.map(c => c.name).join(',')}`);
+      ok('清理：本次測試帳號、頻道與公司已刪除', !left.length && !leftC.length && !leftO2.length, `剩下使用者 ${us.body.users.map(u => u.username).join(',')}；頻道 ${cs.body.channels.map(c => c.name).join(',')}；公司 ${(og2.body.orgs || []).map(o => o.code).join(',')}`);
     }
     const fails = results.filter(r => r[0] === 'FAIL').length;
     console.log(`\n${results.length - fails}/${results.length} 通過`); process.exit(fails ? 1 : 0);

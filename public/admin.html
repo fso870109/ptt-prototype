@@ -13,12 +13,13 @@
 <div class="admin">
   <header class="topbar">
     <strong>🛠️ 管理後台</strong>
-    <div class="me"><span id="who"></span> <a class="link" href="/dispatch">調度台</a> <a class="link" href="/">回對講</a> <button id="logout" class="link">登出</button></div>
+    <div class="me"><span id="who"></span> <a class="link hidden" id="platformLink" href="/platform">平台後台</a> <a class="link" href="/dispatch">調度台</a> <a class="link" href="/">回對講</a> <button id="logout" class="link">登出</button></div>
   </header>
 
   <section id="loginBox" class="card hidden">
-    <h2>管理員登入</h2>
+    <h2>公司後台登入</h2>
     <form id="loginForm">
+      <input id="org" placeholder="公司代碼" autocomplete="organization" autocapitalize="characters">
       <input id="username" placeholder="帳號" autocomplete="username" autocapitalize="none">
       <input id="password" type="password" placeholder="密碼" autocomplete="current-password">
       <button class="primary" type="submit">登入</button>
@@ -26,7 +27,7 @@
     </form>
   </section>
 
-  <section id="denied" class="card hidden"><h2>需要管理員權限</h2><p>你的帳號不是管理員，無法使用後台。</p></section>
+  <section id="denied" class="card hidden"><h2>需要公司管理員權限</h2><p>你的帳號不是管理員，無法使用後台。</p></section>
 
   <div id="panels" class="hidden">
     <section class="card" id="alertsCard">
@@ -40,7 +41,7 @@
         <input id="nuUsername" placeholder="帳號（英數字）" autocapitalize="none" required>
         <input id="nuName" placeholder="顯示名稱">
         <input id="nuPassword" type="text" placeholder="密碼（留空自動產生）">
-        <select id="nuRole"><option value="user">一般使用者</option><option value="dispatcher">調度員</option><option value="admin">管理員</option></select>
+        <select id="nuRole"><option value="user">一般使用者</option><option value="dispatcher">調度員</option><option value="org_admin">公司管理員</option></select>
         <button class="primary" type="submit">建立使用者</button>
       </form>
       <p id="newPw" class="notice hidden"></p>

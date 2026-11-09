@@ -8,6 +8,7 @@ const store = {
   get token() { return localStorage.getItem('ptt_token') || ''; }, set token(v) { v ? localStorage.setItem('ptt_token', v) : localStorage.removeItem('ptt_token'); },
   get channel() { return localStorage.getItem('ptt_channel') || ''; }, set channel(v) { localStorage.setItem('ptt_channel', v || ''); },
   get shareLoc() { return localStorage.getItem('ptt_share_loc') === '1'; }, set shareLoc(v) { localStorage.setItem('ptt_share_loc', v ? '1' : '0'); },
+  get org() { return localStorage.getItem('ptt_org') || ''; }, set org(v) { v ? localStorage.setItem('ptt_org', v) : localStorage.removeItem('ptt_org'); },
 };
 const ROLE_LABEL = { supervisor: '主管', member: '一般', listener: '只聽' };
 
@@ -312,10 +313,11 @@ function handle(m) {
       S.authFailed = true; store.token = ''; showLogin(m.reason === 'revoked' ? '你的帳號已被停用或密碼已重設，請重新登入' : '登入已過期，請重新登入'); break;
     case 'welcome':
       S.me = m.user; S.myId = m.user.id; S.channels = m.channels; S.dms = m.dms || []; S.online = m.online || [];
-      $('#meName').textContent = m.user.displayName + (m.user.role === 'admin' ? '（管理員）' : m.user.role === 'dispatcher' ? '（調度員）' : '');
-      $('#adminLink').classList.toggle('hidden', m.user.role !== 'admin');
-      $('#dispatchLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'dispatcher');
-      $('#callDispatch').classList.toggle('hidden', m.user.role === 'admin' || m.user.role === 'dispatcher');
+      const roleLabel = { admin: '平台管理員', org_admin: '公司管理員', dispatcher: '調度員' }[m.user.role];
+      $('#meName').textContent = m.user.displayName + (roleLabel ? '（' + roleLabel + '）' : '');
+      $('#adminLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'org_admin');
+      $('#dispatchLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'org_admin' && m.user.role !== 'dispatcher');
+      $('#callDispatch').classList.toggle('hidden', m.user.role === 'admin' || m.user.role === 'org_admin' || m.user.role === 'dispatcher');
       setConn('on', '已連線');
       S.alerts = new Map((m.alerts || []).map(a => [a.id, a])); renderAlerts();
       renderChannels(); renderDms(); renderOthers();
@@ -595,17 +597,19 @@ function showLogin(msg) {
 function showMain() { $('#login').classList.add('hidden'); $('#main').classList.remove('hidden'); connect(); }
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault(); unlockAudio();
-  const username = $('#username').value.trim(), password = $('#password').value;
-  if (!username || !password) { $('#loginErr').textContent = '請輸入帳號與密碼'; return; }
+  const username = $('#username').value.trim(), password = $('#password').value, org = $('#org').value.trim();
+  if (!org || !username || !password) { $('#loginErr').textContent = '請輸入公司代碼、帳號與密碼'; return; }
+  store.org = org;
   $('#enter').disabled = true; $('#loginErr').textContent = '';
   try {
-    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, org }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { $('#loginErr').textContent = j.message || '登入失敗'; return; }
     store.token = j.token; $('#password').value = ''; S.retry = 0; showMain();
   } catch { $('#loginErr').textContent = '無法連線到伺服器（若剛喚醒請稍候再試）'; }
   finally { $('#enter').disabled = false; }
 });
+if (store.org && $('#org')) $('#org').value = store.org;
 if (store.token) {
   showMain();
   toast('點一下畫面任一處以啟用聲音');

@@ -2,7 +2,8 @@
 // 管理後台：使用 /api/admin/*（需要管理員 token）
 const $ = (s) => document.querySelector(s);
 const ROLE_LABEL = { supervisor: '主管', member: '一般', listener: '只聽' };
-const USER_ROLE_LABEL = { user: '使用者', dispatcher: '調度員', admin: '管理員' };
+const USER_ROLE_LABEL = { user: '使用者', dispatcher: '調度員', org_admin: '公司管理員', admin: '平台管理員' };
+const SETTABLE_ROLES = { user: '使用者', dispatcher: '調度員', org_admin: '公司管理員' };
 let token = localStorage.getItem('ptt_token') || '';
 let me = null, users = [], channels = [];
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -20,7 +21,8 @@ async function boot() {
   let j; try { j = await api('GET', '/api/me'); } catch { return; }
   me = j.user; $('#who').textContent = `${me.displayName}（${me.username}）`;
   $('#loginBox').classList.add('hidden');
-  if (me.role !== 'admin') { $('#denied').classList.remove('hidden'); return; }
+  if (me.role !== 'admin' && me.role !== 'org_admin') { $('#denied').classList.remove('hidden'); return; }
+  const pl = $('#platformLink'); if (pl) pl.classList.toggle('hidden', me.role !== 'admin');
   $('#panels').classList.remove('hidden');
   await refresh();
 }
@@ -34,7 +36,7 @@ function renderAlerts(list) {
 function renderUsers() {
   $('#userRows').innerHTML = users.map(u => `<tr data-id="${esc(u.id)}">
     <td>${esc(u.username)}</td><td>${esc(u.displayName)}</td>
-    <td>${u.id === me.id ? (USER_ROLE_LABEL[u.role] || u.role) : `<select data-act="setuserrole">${Object.entries(USER_ROLE_LABEL).map(([k, v]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
+    <td>${u.id === me.id ? (USER_ROLE_LABEL[u.role] || u.role) : `<select data-act="setuserrole">${Object.entries(SETTABLE_ROLES).map(([k, v]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
     <td>${u.disabled ? '<span class="tag off">已停用</span>' : u.online ? '<span class="tag on">在線</span>' : '<span class="tag">離線</span>'}</td>
     <td>${u.id === me.id ? '<span class="muted small">（你）</span> <button data-act="pw">重設密碼</button>' : `
       <button data-act="rename">改名</button>
@@ -60,10 +62,13 @@ function renderChannels() {
 
 $('#loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#username').value.trim(), password: $('#password').value }) });
+  const org = ($('#org') && $('#org').value.trim()) || localStorage.getItem('ptt_org') || '';
+  if (org) localStorage.setItem('ptt_org', org);
+  const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#username').value.trim(), password: $('#password').value, org }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) { $('#loginErr').textContent = j.message || '登入失敗'; return; }
-  token = j.token; localStorage.setItem('ptt_token', token); $('#password').value = ''; boot();
+  token = j.token; localStorage.setItem('ptt_token', token); $('#password').value = ''; if ($('#org') && localStorage.getItem('ptt_org')) $('#org').value = localStorage.getItem('ptt_org');
+boot();
 });
 $('#logout').addEventListener('click', async () => { try { await api('POST', '/api/logout'); } catch {} localStorage.removeItem('ptt_token'); token = ''; location.reload(); });
 $('#newUser').addEventListener('submit', async (e) => {
@@ -120,4 +125,5 @@ $('#channelCards').addEventListener('change', async (e) => {
 });
 $('#alertList').addEventListener('click', async (e) => { const b = e.target.closest('button[data-resolve]'); if (!b) return; if (!confirm('確定解除這個警報？')) return; await api('POST', `/api/admin/alerts/${b.dataset.resolve}/resolve`); toast('警報已解除'); refresh(); });
 setInterval(() => { if (me && me.role === 'admin' && !document.hidden) api('GET', '/api/admin/alerts').then(a => renderAlerts(a.alerts)).catch(() => {}); }, 5000);
+if ($('#org') && localStorage.getItem('ptt_org')) $('#org').value = localStorage.getItem('ptt_org');
 boot();
