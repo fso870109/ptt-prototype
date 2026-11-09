@@ -120,7 +120,16 @@ function dmSummaries(userId) {
     return { conv, peerId: other, peerName: nameOf(other), last: m.ts, lastTalk: m };
   });
 }
-function kick(userId, code = 4003, reason = 'revoked') { const o = online.get(userId); if (o) for (const s of [...o.sockets]) { send(s, { t: 'auth_failed', reason }); s.close(code, reason); } }
+function kick(userId, code = 4003, reason = 'revoked') {
+  const o = online.get(userId); if (!o) return;
+  for (const s of [...o.sockets]) {
+    s.revoked = true; o.sockets.delete(s); // 立即從線上名單移除，不再收到任何語音
+    if (s.talking) { const f = floors.get(s.talking); if (f && f.ws === s) endFloor(s.talking, 'revoked'); }
+    send(s, { t: 'auth_failed', reason }); s.close(code, reason);
+    setTimeout(() => { try { s.terminate(); } catch {} }, 1500); // 經過雲端代理時 close 交握可能卡住
+  }
+  broadcastPresence(o.channel); broadcastOnline();
+}
 
 // 使用者失去目前頻道權限時，移回大廳
 function enforceAccess(userId) {
@@ -343,6 +352,7 @@ wss.on('connection', (ws) => {
   const authTimer = setTimeout(() => { if (!me) ws.close(4001, 'auth_timeout'); }, 10000);
 
   ws.on('message', (data, isBinary) => {
+    if (ws.revoked) return;
     if (isBinary) {
       if (!me || !ws.talking) return;
       const fl = floors.get(ws.talking);
