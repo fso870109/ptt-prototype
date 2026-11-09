@@ -76,6 +76,8 @@ try:
     B.wait_for_function("document.querySelector('#locList').textContent.includes('小明')", timeout=15000)
     ll = B.inner_text('#locList')
     ok('B 的地圖頁看到 A 的位置、電量與更新時間', '小明' in ll and '電量' in ll and ('秒前' in ll or '分鐘前' in ll), ll.replace('\n', ' | '))
+    try: B.wait_for_function("document.querySelectorAll('.leaflet-marker-icon').length >= 2", timeout=15000)
+    except Exception: pass
     nmk = B.evaluate("document.querySelectorAll('.leaflet-marker-icon').length")
     attr = B.inner_text('.leaflet-control-attribution')
     ok('Leaflet 地圖有標記並標示 OpenStreetMap 來源', nmk >= 2 and 'OpenStreetMap' in attr, f'{nmk} 個標記；{attr}')
