@@ -837,3 +837,42 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 - `DELETE /api/platform/reports/:id`
 
 健康檢查 `GET /api/health` 另含 `reportsRetentionDays`（90）。
+
+## 13. 刪除帳號
+
+`POST /api/me/delete` `{ "password": "目前密碼" }`
+
+成功後帳號與個人資料會被刪除，文字訊息改以「已刪除的使用者」匿名顯示。平台管理員與公司最後一位管理員不能自助刪除（分別回 `platform_admin`、`last_admin`）。公開說明頁：`/privacy`、`/terms`、`/delete-account`。
+
+## 14. iOS Push-to-Talk（APNs）
+
+未設定 `APNS_KEY_P8`（或 `APNS_P8`）、`APNS_KEY_ID`、`APNS_TEAM_ID` 時此功能安靜停用；`GET /api/health` 的 `apns` 為 `false`。另可設定 `APNS_BUNDLE_ID`（預設 `app.ptt.mobile`）、`APNS_ENV`（`sandbox`／`production`）。
+
+`POST /api/me/ptt-push`（需登入）
+
+```json
+{ "platform": "ios", "kind": "voip-ptt", "token": "<hex 或 base64url>", "bundleId": "app.ptt.mobile", "channelId": "lobby", "channelUUID": "..." }
+```
+
+`DELETE /api/me/ptt-push` 或 `POST` 且 `token` 為空／`channelId` 為 `null` 可清除。WebSocket 亦可送 `{ "t": "ptt_push_token", ... }`。
+
+有人開始講話時，伺服器會對**不在線**且已登記 token 的 iOS 成員送 APNs：HTTP/2 POST、`apns-push-type: pushtotalk`、`apns-topic: {bundleId}.voip-ptt`、`apns-priority: 10`、`apns-expiration: 0`。回 410 時清除該 token。
+
+## 15. 通話紀錄
+
+不存音訊。欄位：說話者、頻道或私訊對象、開始時間、長度、是否被插話。保留 90 天。
+
+- `GET /api/calls` 或 `GET /api/call-logs`：一般使用者看自己參與的；公司管理員與調度員看該公司
+- 加上 `?format=csv` 可匯出
+- `GET /api/admin/calls`：公司後台
+
+## 16. 頻道邀請與 QR Code
+
+管理員或頻道主管可產生邀請（可設有效期、次數，可撤銷）。QR Code 由伺服器以本地 `qrcode` 函式庫產生 SVG，不呼叫外部 API。公開加入頁：`/join?code=`。
+
+- `POST /api/admin/invites` 或 `POST /api/invites` `{ channelId, kind: "join"|"register", maxUses, expiresInHours }`
+- `GET /api/admin/invites`、`GET /api/invites`（列出自己權限內的邀請）
+- `POST /api/admin/invites/:id/revoke` 或 `POST /api/invites/:code/revoke`
+- `GET /api/invites/:code`、`GET /api/invites/:code/qr`
+- `POST /api/invites/:code/accept`（需登入，加入頻道）
+- `POST /api/invites/:code/register` `{ username, password, displayName }`（`kind` 必須是 `register`，仍受人數上限）

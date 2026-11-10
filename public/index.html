@@ -13,6 +13,7 @@
 <link rel="icon" href="/favicon-16.png" type="image/png" sizes="16x16">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<script src="/theme.js"></script>
 <link rel="stylesheet" href="/style.css">
 <title>Geelo 吉洛</title>
 </head>
@@ -75,6 +76,46 @@
     <p id="settingsConn" class="muted small">尚未連線</p>
     <button id="openReport" type="button" class="primary settings-btn">回報問題</button>
     <p class="muted small">回報會附上裝置與約 200 行連線事件（已過濾 token、密碼與音訊內容），保留 90 天。公司管理員可在後台查看。</p>
+    <h3 class="settings-h">外觀</h3>
+    <div class="theme-row">
+      <label for="themeSelect">主題</label>
+      <select id="themeSelect">
+        <option value="system">跟隨系統</option>
+        <option value="light">淺色</option>
+        <option value="dark">深色</option>
+      </select>
+    </div>
+    <h3 class="settings-h">通話紀錄</h3>
+    <p class="muted small">只記錄說話者、頻道或私訊對象、開始時間、長度與是否被插話，不存音訊。保留 90 天。</p>
+    <div id="callList"></div>
+    <button id="callRefresh" type="button" class="settings-btn">重新整理紀錄</button>
+    <button id="callExport" type="button" class="settings-btn">匯出 CSV</button>
+    <h3 class="settings-h">邀請加入頻道</h3>
+    <p class="muted small">已登入者可輸入邀請碼加入頻道。頻道主管與公司管理員可產生邀請連結與 QR Code（可設有效期、次數，可撤銷）。也可建立「邀請註冊」讓新人開帳號加入公司，仍受人數上限限制。</p>
+    <div class="row">
+      <input id="inviteCodeIn" placeholder="邀請碼或完整連結" autocomplete="off">
+      <button id="inviteAccept" type="button">加入</button>
+    </div>
+    <p id="inviteJoinErr" class="err"></p>
+    <div id="inviteCreateBox" class="hidden">
+      <div class="row">
+        <select id="inviteChannel"></select>
+        <select id="inviteKind">
+          <option value="join">加入頻道（已有帳號）</option>
+          <option value="register">邀請註冊（新人開帳號）</option>
+        </select>
+      </div>
+      <div class="row">
+        <input id="inviteHours" type="number" min="0" placeholder="有效時數（空白＝不限）">
+        <input id="inviteUses" type="number" min="0" placeholder="次數上限（空白＝不限）">
+      </div>
+      <button id="inviteCreate" type="button" class="settings-btn">產生邀請與 QR Code</button>
+      <div id="inviteResult" class="hidden">
+        <p><a class="link" id="inviteUrl" target="_blank" rel="noopener"></a></p>
+        <div class="qr-preview"><img id="inviteQr" alt="邀請 QR Code"></div>
+      </div>
+      <div id="inviteMine"></div>
+    </div>
     <h3 class="settings-h">帳號與條款</h3>
     <p><a class="link" href="/privacy" target="_blank" rel="noopener">隱私權政策</a></p>
     <p><a class="link" href="/terms" target="_blank" rel="noopener">服務條款</a></p>

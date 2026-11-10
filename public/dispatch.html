@@ -8,6 +8,7 @@
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<script src="/theme.js"></script>
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/dispatch.css">
 </head>
@@ -70,6 +71,13 @@
     <div class="alert-wrap">
       <h2>緊急警報</h2>
       <ul id="alertList" class="list"></ul>
+    </div>
+    <div class="call-wrap">
+      <h2>通話紀錄</h2>
+      <p class="muted small">不含音訊，保留 90 天。可匯出 CSV。</p>
+      <button type="button" id="callRefresh">重新整理</button>
+      <button type="button" id="callExport">匯出 CSV</button>
+      <div id="callList"></div>
     </div>
   </div>
 </div>

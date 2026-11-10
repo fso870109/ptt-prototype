@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f172a">
+<title>加入頻道 · Geelo 吉洛</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<script src="/theme.js"></script>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<article class="legal">
+  <p class="muted small"><a class="link" href="/">← 回到 Geelo</a></p>
+  <h1>加入頻道</h1>
+  <p id="status" class="muted">讀取邀請中…</p>
+  <div id="info" class="hidden">
+    <p>公司：<b id="orgName"></b>（<span id="orgCode"></span>）</p>
+    <p>頻道：<b id="chName"></b></p>
+    <p id="kindLine" class="muted small"></p>
+    <div class="qr-preview"><img id="qr" alt="邀請 QR Code"></div>
+    <p class="muted small">請用 Geelo App 掃描此 QR Code，或在已登入後點下方按鈕加入。QR 由本機產生，不經外部服務。</p>
+  </div>
+  <div id="joinBox" class="hidden">
+    <button class="primary" id="acceptBtn" type="button">加入此頻道</button>
+    <p id="joinErr" class="err"></p>
+  </div>
+  <div id="regBox" class="hidden">
+    <h2>邀請註冊</h2>
+    <p class="muted small">建立新帳號並加入此公司與頻道。人數仍受公司方案上限限制。</p>
+    <form id="regForm" class="login-card" style="margin:0;text-align:left;max-width:420px">
+      <input id="regUser" placeholder="帳號" autocomplete="username" autocapitalize="none" required>
+      <input id="regName" placeholder="顯示名稱">
+      <input id="regPass" type="password" placeholder="密碼（至少 8 個字元）" autocomplete="new-password" required>
+      <button class="primary" type="submit">建立帳號並加入</button>
+      <p id="regErr" class="err"></p>
+    </form>
+  </div>
+  <p id="loginHint" class="hint hidden">請先 <a class="link" href="/">登入</a> 後再回來加入此頻道。</p>
+</article>
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const code = (params.get('code') || '').trim();
+  const token = localStorage.getItem('ptt_token') || '';
+  const $ = (id) => document.getElementById(id);
+  if (!code) { $('status').textContent = '缺少邀請代碼。'; return; }
+  $('qr').src = '/api/invites/' + encodeURIComponent(code) + '/qr';
+  fetch('/api/invites/' + encodeURIComponent(code)).then(async (r) => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      $('status').textContent = j.message || '此邀請無效';
+      return;
+    }
+    const inv = j.invite || {};
+    $('status').textContent = '邀請有效';
+    $('info').classList.remove('hidden');
+    $('orgName').textContent = inv.orgName || '';
+    $('orgCode').textContent = inv.orgCode || '';
+    $('chName').textContent = inv.channelName || '';
+    $('kindLine').textContent = inv.kind === 'register'
+      ? '這是「邀請註冊」連結：尚未有帳號的人可以在此建立帳號。'
+      : '這是「加入頻道」連結：需已有此公司的帳號並已登入。';
+    if (inv.kind === 'register') $('regBox').classList.remove('hidden');
+    if (token) $('joinBox').classList.remove('hidden');
+    else if (inv.kind !== 'register') $('loginHint').classList.remove('hidden');
+  }).catch(() => { $('status').textContent = '無法連線到伺服器'; });
+
+  $('acceptBtn').onclick = async () => {
+    $('joinErr').textContent = '';
+    try {
+      const r = await fetch('/api/invites/' + encodeURIComponent(code) + '/accept', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: '{}'
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { $('joinErr').textContent = j.message || '無法加入'; return; }
+      location.href = '/';
+    } catch { $('joinErr').textContent = '無法連線到伺服器'; }
+  };
+
+  $('regForm').onsubmit = async (e) => {
+    e.preventDefault();
+    $('regErr').textContent = '';
+    const body = {
+      username: $('regUser').value.trim(),
+      displayName: $('regName').value.trim(),
+      password: $('regPass').value
+    };
+    try {
+      const r = await fetch('/api/invites/' + encodeURIComponent(code) + '/register', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { $('regErr').textContent = j.message || '註冊失敗'; return; }
+      const org = (j.org && j.org.code) || '';
+      const login = await fetch('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: body.username, password: body.password, org })
+      });
+      const lj = await login.json().catch(() => ({}));
+      if (login.ok && lj.token) {
+        localStorage.setItem('ptt_token', lj.token);
+        if (org) localStorage.setItem('ptt_org', org);
+      }
+      location.href = '/';
+    } catch { $('regErr').textContent = '無法連線到伺服器'; }
+  };
+})();
+</script>
+</body>
+</html>

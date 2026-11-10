@@ -64,6 +64,7 @@
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', maxZoom: 19 }).addTo(map);
     }
     connect();
+    loadCalls();
   }
 
   function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
@@ -349,5 +350,26 @@
     $('alertAck').onclick = () => $('alertOverlay').classList.add('hidden');
     $('alertResolve').onclick = () => { send({ t: 'alert_resolve', id: a.id }); $('alertOverlay').classList.add('hidden'); };
   }
-  function esc(s) { return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  function esc(s) { return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }  function fmtCall(c) {
+    const when = new Date(c.startedAt).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
+    const dur = ((c.durMs || 0) / 1000).toFixed(1);
+    const where = c.kind === 'dm' ? ('私訊 · ' + (c.peerName || '對方')) : ('#' + (c.channelName || ''));
+    return (c.fromName || '使用者') + ' → ' + where + ' · ' + when + ' · ' + dur + ' 秒' + (c.preempted ? ' · 被插話' : '');
+  }
+  async function loadCalls() {
+    const el = $('callList'); if (!el) return;
+    try {
+      const r = await fetch('/api/calls?limit=200', { headers: { authorization: 'Bearer ' + token } });
+      const j = await r.json().catch(() => ({}));
+      el.innerHTML = (j.calls || []).map(c => '<div class="call-item">' + (c.fromName || '') + ' · ' + fmtCall(c) + '</div>').join('') || '<p class="muted">目前沒有通話紀錄</p>';
+    } catch { el.textContent = '無法載入'; }
+  }
+  async function exportCalls() {
+    const r = await fetch('/api/calls?format=csv', { headers: { authorization: 'Bearer ' + token } });
+    if (!r.ok) { toast('無法匯出'); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'geelo-calls.csv'; a.click();
+  }
+  if ($('callRefresh')) $('callRefresh').onclick = loadCalls;
+  if ($('callExport')) $('callExport').onclick = exportCalls;
 })();

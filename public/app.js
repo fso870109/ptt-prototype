@@ -792,6 +792,7 @@ document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click
   document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
   ['channels', 'members', 'dms', 'map', 'settings'].forEach(t => $('#tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
   if (b.dataset.tab === 'map') { ensureMap(); setTimeout(() => { map && map.invalidateSize(); renderLocs(); fitMap(); }, 50); wsSend({ t: 'get_locs' }); }
+  if (b.dataset.tab === 'settings') { loadCalls(); setupInviteBox(); }
 }));
 $('#channelList').addEventListener('click', (e) => { const li = e.target.closest('li[data-ch]'); if (!li) return; if (li.dataset.ch === S.channel) { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); } else wsSend({ t: 'join', channel: li.dataset.ch }); });
 ['#memberList', '#otherList', '#dmList'].forEach(sel => $(sel).addEventListener('click', (e) => { const li = e.target.closest('li[data-uid]'); if (li) openDm(li.dataset.uid, li.dataset.name); }));
@@ -887,3 +888,102 @@ if ($('#reportSend')) $('#reportSend').addEventListener('click', async () => {
 });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+function fmtCall(c) {
+  const when = new Date(c.startedAt).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
+  const dur = ((c.durMs || 0) / 1000).toFixed(1);
+  const where = c.kind === 'dm' ? ('私訊 · ' + (c.peerName || '對方')) : ('#' + (c.channelName || ''));
+  return (c.fromName || '使用者') + ' → ' + where + ' · ' + when + ' · ' + dur + ' 秒' + (c.preempted ? ' · 被插話' : '');
+}
+async function loadCalls() {
+  const el = $('#callList'); if (!el) return;
+  try {
+    const r = await fetch('/api/calls?limit=100', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    const rows = j.calls || [];
+    el.innerHTML = rows.map(c => '<div class="call-item">' + esc(fmtCall(c)) + '</div>').join('') || '<p class="muted small">目前沒有通話紀錄</p>';
+  } catch { el.innerHTML = '<p class="muted small">無法載入通話紀錄</p>'; }
+}
+async function downloadCallsCsv() {
+  const r = await fetch('/api/calls?format=csv', { headers: authHeaders() });
+  if (!r.ok) { toast('無法匯出'); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'geelo-calls.csv'; a.click();
+}
+function parseInviteCode(raw) {
+  const s = String(raw || '').trim();
+  try { const u = new URL(s, location.origin); const c = u.searchParams.get('code'); if (c) return c; } catch {}
+  if (/^[A-Za-z0-9_-]{8,24}$/.test(s)) return s;
+  return '';
+}
+function canManageInvites() {
+  if (!S.me) return false;
+  if (S.me.role === 'admin' || S.me.role === 'org_admin') return true;
+  return (S.channels || []).some(c => c.myRole === 'supervisor');
+}
+function setupInviteBox() {
+  const box = $('#inviteCreateBox'); if (!box) return;
+  const ok = canManageInvites();
+  box.classList.toggle('hidden', !ok);
+  if (!ok) return;
+  const sel = $('#inviteChannel');
+  const list = (S.channels || []).filter(c => S.me.role === 'admin' || S.me.role === 'org_admin' || c.myRole === 'supervisor');
+  sel.innerHTML = list.map(c => `<option value="${esc(c.id)}"># ${esc(c.name)}</option>`).join('');
+  loadMyInvites();
+}
+async function loadMyInvites() {
+  const el = $('#inviteMine'); if (!el) return;
+  try {
+    const r = await fetch('/api/invites', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    el.innerHTML = (j.invites || []).map(i => {
+      const st = i.revoked ? '已撤銷' : (i.expiresAt && i.expiresAt < Date.now() ? '已過期' : '有效');
+      return `<div class="call-item" data-inv="${esc(i.code)}"><div>${esc(i.channelName)} · ${i.kind === 'register' ? '邀請註冊' : '加入頻道'} · ${st} · ${i.uses || 0}${i.maxUses ? '/' + i.maxUses : ''} 次</div>
+        <div class="muted small"><a class="link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.url)}</a></div>
+        ${i.revoked ? '' : '<button type="button" data-revoke="' + esc(i.code) + '">撤銷</button>'}</div>`;
+    }).join('') || '<p class="muted small">尚無邀請</p>';
+  } catch { el.innerHTML = ''; }
+}
+if ($('#themeSelect')) {
+  $('#themeSelect').value = (window.PttTheme && PttTheme.get()) || 'system';
+  $('#themeSelect').addEventListener('change', () => PttTheme.set($('#themeSelect').value));
+}
+if ($('#callRefresh')) $('#callRefresh').addEventListener('click', loadCalls);
+if ($('#callExport')) $('#callExport').addEventListener('click', downloadCallsCsv);
+if ($('#inviteAccept')) $('#inviteAccept').addEventListener('click', async () => {
+  const code = parseInviteCode($('#inviteCodeIn').value);
+  const err = $('#inviteJoinErr'); err.textContent = '';
+  if (!code) { err.textContent = '請輸入有效的邀請碼或連結'; return; }
+  try {
+    const r = await fetch('/api/invites/' + encodeURIComponent(code) + '/accept', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { err.textContent = j.message || '無法加入'; return; }
+    toast('已加入 ' + ((j.channel && j.channel.name) || '頻道'));
+    if (j.channel && j.channel.id) wsSend({ t: 'join', channel: j.channel.id });
+  } catch { err.textContent = '無法連線到伺服器'; }
+});
+if ($('#inviteCreate')) $('#inviteCreate').addEventListener('click', async () => {
+  const channelId = $('#inviteChannel').value;
+  const kind = $('#inviteKind').value;
+  const hours = $('#inviteHours').value;
+  const uses = $('#inviteUses').value;
+  const body = { channelId, kind };
+  if (hours) body.expiresInHours = +hours;
+  if (uses) body.maxUses = +uses;
+  try {
+    const r = await fetch('/api/invites', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(j.message || '無法產生邀請'); return; }
+    const inv = j.invite;
+    $('#inviteResult').classList.remove('hidden');
+    $('#inviteUrl').textContent = inv.url; $('#inviteUrl').href = inv.url;
+    $('#inviteQr').src = '/api/invites/' + encodeURIComponent(inv.code) + '/qr';
+    loadMyInvites();
+  } catch { toast('無法連線到伺服器'); }
+});
+if ($('#inviteMine')) $('#inviteMine').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-revoke]'); if (!b) return;
+  if (!confirm('確定撤銷此邀請？')) return;
+  await fetch('/api/invites/' + encodeURIComponent(b.dataset.revoke) + '/revoke', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' });
+  loadMyInvites();
+});

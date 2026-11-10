@@ -6,6 +6,7 @@
 <meta name="robots" content="noindex">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<script src="/theme.js"></script>
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/admin.css">
 <title>管理後台 · Geelo 吉洛</title>
@@ -62,6 +63,25 @@
       <h2>即時語音轉文字</h2>
       <label class="chk"><input type="checkbox" id="saveCaptions"> 把最終字幕存成文字紀錄（只存文字，絕不存語音）</label>
       <p class="muted small">講話時的即時字幕由講話者的瀏覽器用 Web Speech API（繁體中文）產生，再以文字廣播給同頻道的人。伺服器不保存、也不轉送語音去做辨識。部分 iOS Safari 與 Firefox 不支援，那些裝置仍可對講，只是沒有字幕。Chrome／Edge 可能會把聲音送到瀏覽器廠商的辨識服務，這不是我們自己的伺服器。</p>
+    </section>
+    <section class="card">
+      <h2>通話紀錄</h2>
+      <p class="muted small">只記錄說話者、頻道或私訊對象、開始時間、長度與是否被插話，不保存任何音訊。保留 90 天。</p>
+      <button type="button" id="callRefresh">重新整理</button>
+      <button type="button" id="callExport">匯出 CSV</button>
+      <div id="callList"></div>
+    </section>
+    <section class="card">
+      <h2>頻道邀請與 QR Code</h2>
+      <p class="muted small">產生邀請連結與 QR Code（本機繪製）。可設定有效期與使用次數，並可撤銷。選擇「邀請註冊」時，新人可藉此建立帳號並加入該公司，仍受人數上限限制。</p>
+      <form id="newInvite" class="grid-form">
+        <select id="invChannel" required></select>
+        <select id="invKind"><option value="join">加入頻道</option><option value="register">邀請註冊</option></select>
+        <input id="invHours" type="number" min="0" placeholder="有效時數（空白不限）">
+        <input id="invUses" type="number" min="0" placeholder="次數上限（空白不限）">
+        <button class="primary" type="submit">產生邀請</button>
+      </form>
+      <div id="invList"></div>
     </section>
     <section class="card">
       <h2>問題回報</h2>

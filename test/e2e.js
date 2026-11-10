@@ -524,6 +524,56 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     const delLast = await http('POST', '/api/me/delete', { password: 'La-pass-123' }, tokLA);
     ok('公司最後一位管理員不能自助刪除', delLast.status === 400 && delLast.body.error === 'last_admin', JSON.stringify(delLast.body));
 
+    // ===== 通話紀錄、邀請、PTT token =====
+    const adminCalls = await http('GET', '/api/admin/calls?limit=50', null, adminTok);
+    ok('通話紀錄不含音訊且有說話者與時長', adminCalls.status === 200 && Array.isArray(adminCalls.body.calls) && adminCalls.body.calls.length > 0 && adminCalls.body.calls.every(c => !c.audio && c.fromName && typeof c.durMs === 'number' && (c.preempted === true || c.preempted === false)));
+    const csvR = await fetch(BASE + '/api/admin/calls?format=csv', { headers: { Authorization: 'Bearer ' + adminTok } });
+    const csvText = await csvR.text();
+    ok('通話紀錄可匯出 CSV', csvR.status === 200 && csvText.includes('fromName') && csvText.includes('durMs') && !/RIFF|WAVE/.test(csvText));
+    const myCalls = await http('GET', '/api/calls', null, tok[sup.id]);
+    ok('使用者看得到自己參與的通話紀錄', myCalls.status === 200 && (myCalls.body.calls || []).some(c => c.from === sup.id || c.peerId === sup.id));
+
+    const joinPage = await (await fetch(BASE + '/join?code=placeholder')).text();
+    ok('加入頻道頁可開啟', joinPage.includes('加入頻道') && joinPage.includes('QR'));
+
+    const invCh = await http('POST', '/api/admin/channels', { name: `邀請頻道-${sfx}`, open: false }, adminTok);
+    const ICH = invCh.body.channel.id; created.channels.push(ICH);
+    await http('PUT', `/api/admin/channels/${ICH}/members/${sup.id}`, { role: 'supervisor' }, adminTok);
+    const invByAdmin = await http('POST', '/api/admin/invites', { channelId: ICH, kind: 'join', maxUses: 2, expiresInHours: 24 }, adminTok);
+    ok('管理員可產生邀請連結', invByAdmin.status === 201 && invByAdmin.body.invite && invByAdmin.body.invite.url.includes('/join?code='));
+    const invQr = await fetch(BASE + '/api/invites/' + invByAdmin.body.invite.code + '/qr');
+    const qrTxt = await invQr.text();
+    ok('邀請 QR 由本機產生 SVG', invQr.status === 200 && /<svg/i.test(qrTxt) && !qrTxt.includes('http://api.qrserver'));
+
+    const joiner = await mk('jn', '受邀者', 'Jn-pass-123');
+    const tokJn = await login(joiner.username, joiner.password);
+    const invAcc = await http('POST', '/api/invites/' + invByAdmin.body.invite.code + '/accept', {}, tokJn);
+    ok('已登入者可透過邀請加入頻道', invAcc.status === 200 && invAcc.body.channel && invAcc.body.channel.id === ICH);
+
+    const invBySup = await http('POST', '/api/invites', { channelId: ICH, kind: 'join', maxUses: 3, expiresInHours: 2 }, tok[sup.id]);
+    ok('頻道主管可產生邀請', invBySup.status === 201 && invBySup.body.invite && invBySup.body.invite.code);
+
+    const invRev = await http('POST', '/api/admin/invites/' + invByAdmin.body.invite.id + '/revoke', {}, adminTok);
+    const accGone = await http('POST', '/api/invites/' + invByAdmin.body.invite.code + '/accept', {}, tokJn);
+    ok('撤銷後邀請失效', invRev.status === 200 && accGone.status === 410);
+
+    const invReg = await http('POST', '/api/admin/invites', { channelId: ICH, kind: 'register', maxUses: 1 }, adminTok);
+    const guestName = `t_new_${sfx}`;
+    const registered = await http('POST', '/api/invites/' + invReg.body.invite.code + '/register', { username: guestName, password: 'New-pass-123', displayName: '新人' });
+    ok('邀請註冊可建立帳號並加入該公司', registered.status === 201 && registered.body.user && registered.body.user.username === guestName);
+    if (registered.body && registered.body.user) created.users.push(registered.body.user.id);
+    const guestLogin = await login(guestName, 'New-pass-123');
+    ok('邀請註冊的新人可以用該公司代碼登入', !!guestLogin);
+    const usedUp = await http('POST', '/api/invites/' + invReg.body.invite.code + '/register', { username: `t_xx_${sfx}`, password: 'New-pass-123', displayName: '另一人' });
+    ok('邀請註冊受次數上限限制', usedUp.status === 410, JSON.stringify(usedUp.body));
+
+    const ptt = await http('POST', '/api/me/ptt-push', { platform: 'ios', kind: 'voip-ptt', token: 'aabbccddeeff00112233445566778899', bundleId: 'app.ptt.mobile', channelId: 'lobby', channelUUID: '00000000-0000-4000-8000-000000000001' }, tokJn);
+    ok('裝置可登記 PTT token', ptt.status === 200 && ptt.body.ok);
+    const pttDel = await http('DELETE', '/api/me/ptt-push', null, tokJn);
+    ok('可清除 PTT token', pttDel.status === 200);
+    const hApns = await http('GET', '/api/health');
+    ok('未設定 APNs 金鑰時功能安靜停用', hApns.body.apns === false);
+
     // ===== 不保存錄音 =====
     const hist = await http('GET', '/api/history?conv=lobby', null, adminTok), wav = await fetch(BASE + '/audio/0123456789abcdef.wav');
     const h2 = await http('GET', '/api/health');

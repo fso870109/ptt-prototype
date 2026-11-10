@@ -30,6 +30,8 @@ async function refresh() {
   const [u, c, a, s] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/channels'), api('GET', '/api/admin/alerts'), api('GET', '/api/admin/settings').catch(() => ({ settings: { saveCaptions: false } }))]);
   users = u.users; channels = c.channels; renderUsers(); renderChannels(); renderAlerts(a.alerts);
   loadReports();
+  loadCalls();
+  loadInvites();
   const box = $('#saveCaptions');
   if (box) box.checked = !!(s.settings && s.settings.saveCaptions);
 }
@@ -180,4 +182,57 @@ if ($('#rptList')) $('#rptList').addEventListener('click', async (e) => {
   const id = b.closest('.rpt-item').dataset.id;
   await api('PATCH', '/api/admin/reports/' + id, { status: b.dataset.rpt });
   toast('已更新回報狀態'); loadReports();
+});
+
+function fmtCall(c) {
+  const when = new Date(c.startedAt).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' });
+  const dur = ((c.durMs || 0) / 1000).toFixed(1);
+  const where = c.kind === 'dm' ? ('私訊 · ' + (c.peerName || '對方')) : ('#' + (c.channelName || ''));
+  return `${c.fromName || '使用者'} → ${where} · ${when} · ${dur} 秒${c.preempted ? ' · 被插話' : ''}`;
+}
+async function loadCalls() {
+  if (!$('#callList')) return;
+  try {
+    const j = await api('GET', '/api/admin/calls?limit=200');
+    $('#callList').innerHTML = (j.calls || []).map(c => `<div class="call-item">${esc(fmtCall(c))}</div>`).join('') || '<p class="muted">目前沒有通話紀錄</p>';
+    const sel = $('#invChannel');
+    if (sel) sel.innerHTML = channels.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  } catch {}
+}
+async function exportCalls() {
+  const r = await fetch('/api/admin/calls?format=csv', { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) { toast('無法匯出'); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'geelo-calls.csv'; a.click();
+}
+async function loadInvites() {
+  if (!$('#invList')) return;
+  try {
+    const j = await api('GET', '/api/admin/invites');
+    $('#invList').innerHTML = (j.invites || []).map(i => {
+      const st = i.revoked ? '已撤銷' : '有效';
+      return `<div class="rpt-item" data-id="${esc(i.id)}">
+        <div><b># ${esc(i.channelName)}</b> · ${i.kind === 'register' ? '邀請註冊' : '加入頻道'} · ${st} · ${i.uses || 0}${i.maxUses ? '/' + i.maxUses : ''} 次</div>
+        <p class="muted small"><a class="link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.url)}</a></p>
+        <div class="qr-preview"><img alt="QR" src="/api/invites/${esc(i.code)}/qr"></div>
+        ${i.revoked ? '' : '<button data-invrevoke="1">撤銷</button>'}
+      </div>`;
+    }).join('') || '<p class="muted">尚無邀請</p>';
+  } catch {}
+}
+if ($('#callRefresh')) $('#callRefresh').addEventListener('click', loadCalls);
+if ($('#callExport')) $('#callExport').addEventListener('click', exportCalls);
+if ($('#newInvite')) $('#newInvite').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = { channelId: $('#invChannel').value, kind: $('#invKind').value };
+  if ($('#invHours').value) body.expiresInHours = +$('#invHours').value;
+  if ($('#invUses').value) body.maxUses = +$('#invUses').value;
+  await api('POST', '/api/admin/invites', body);
+  toast('已產生邀請'); loadInvites();
+});
+if ($('#invList')) $('#invList').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-invrevoke]'); if (!b) return;
+  const id = b.closest('[data-id]').dataset.id;
+  await api('POST', '/api/admin/invites/' + id + '/revoke');
+  toast('已撤銷'); loadInvites();
 });
