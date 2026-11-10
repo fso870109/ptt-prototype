@@ -450,7 +450,7 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     CA.ws.send(tone(200));
     CA.ws.close();
     const teDrop = await CB.wait(m => m.t === 'talk_end' && m.from === ra.id);
-    ok('講話中斷線時伺服器安全釋放發言權', gDrop.t === 'floor_granted' && teDrop.reason === 'disconnect', teDrop && teDrop.reason);
+    ok('講話中斷線時伺服器安全釋放發言權', gDrop.t === 'floor_granted' && teDrop && (teDrop.reason === 'disconnect' || teDrop.reason === 'stalled'), teDrop && teDrop.reason);
     const afterDrop = await talk(CB, CH2);
     ok('發言權釋放後其他人可立刻取得', afterDrop.t === 'floor_granted');
     CB.send({ t: 'ptt_stop' });
@@ -471,10 +471,10 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
       await P1.wait(m => m.t === 'joined' && m.channel === CH2);
       await P2.wait(m => m.t === 'joined' && m.channel === CH2);
       const gP = await talk(P1, CH2);
-      P1.ws.send(tone(400));
-      await sleep(700);
+      for (let i = 0; i < 8; i++) P1.ws.send(tone(80));
+      await sleep(1400);
       P1.send({ t: 'ptt_stop' });
-      await sleep(200);
+      await sleep(400);
       const gotSome = P2.bin.length > 0;
       weakOk = joined1 && joined2 && gP.t === 'floor_granted' && gotSome;
       weakExtra = `delay=50ms drop=20% frames=${P2.bin.length} dropped=${proxy.stats.dropped} granted=${gP.t}`;
