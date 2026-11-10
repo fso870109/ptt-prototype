@@ -4,7 +4,7 @@ body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-i
 .hidden{display:none!important}
 .screen{max-width:560px;margin:0 auto;min-height:100%;display:flex;flex-direction:column}
 .login-card{margin:auto;padding:32px 24px;text-align:center;width:100%}
-.logo{font-size:64px}img.logo{width:72px;height:72px;display:block;margin:0 auto;border-radius:18px}
+.logo{font-size:64px}img.logo{width:72px;height:72px;display:block;margin:0 auto}
 h1{margin:8px 0 0;font-size:28px}
 .sub{color:#94a3b8;margin:4px 0 24px}
 input{width:100%;font-size:17px;padding:12px 14px;border-radius:12px;border:1px solid #334155;background:#1e293b;color:#f1f5f9;outline:none}
