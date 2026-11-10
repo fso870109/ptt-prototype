@@ -1,5 +1,5 @@
 'use strict';
-// ====== 一鍵對講 PTT 原型（前端・第二階段）======
+// ====== Geelo 吉洛（前端）======
 // 語音格式：16kHz / 16-bit / 單聲道 PCM，每 ~100ms 一包，透過 WebSocket 二進位訊框傳送。
 // 語音只即時播放，不錄存：伺服器與瀏覽器都不保留任何音訊。
 const $ = (s) => document.querySelector(s);

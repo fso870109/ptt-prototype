@@ -1,6 +1,6 @@
-# 一鍵對講 PTT 原型 · 原生 App／客戶端 API
+# Geelo 吉洛 · 原生 App／客戶端 API
 
-本文件說明 HTTPS REST 與 WebSocket 協定，供網頁與原生 App 對接。  
+本文件說明 HTTPS REST 與 WebSocket 協定，供網頁與原生 App 對接。產品名稱為 Geelo（中文名：吉洛）；伺服器網址與 API 路徑維持不變。  
 **語音只做即時轉發，伺服器不保存任何錄音。**
 
 - 生產環境：`https://ptt-prototype.onrender.com`
@@ -218,7 +218,7 @@ REST API 回應含 `Access-Control-Allow-Origin: *` 與 `Access-Control-Allow-He
 
 ### 2.8.2 `POST /api/billing/checkout`
 
-需登入。本原型**沒有**接綠界、Stripe 或其他真實金流，固定回 `200`：
+需登入。Geelo **沒有**接綠界、Stripe 或其他真實金流，固定回 `200`：
 
 ```json
 {

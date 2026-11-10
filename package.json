@@ -1,7 +1,7 @@
 {
   "name": "ptt-prototype",
   "version": "1.0.0",
-  "description": "一鍵對講 PTT 網頁原型",
+  "description": "Geelo 吉洛（即時對講網頁）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

@@ -1,4 +1,4 @@
-// PTT 原型伺服器（第二階段）
+// Geelo 伺服器
 // - HTTP：靜態檔、登入 API、管理後台 API、文字/照片、位置 API、調度台頁面
 // - WebSocket：信令、語音即時轉發（不保存錄音）、floor control、位置、警報、聊天、調度監聽與來電佇列
 'use strict';
