@@ -122,3 +122,15 @@ a.link,a.link:visited{color:#38bdf8;text-decoration:none}
 .rpt-item{border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:10px}
 .rpt-item pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:#0f172a;padding:8px;border-radius:8px;max-height:160px;overflow:auto}
 .rpt-item img{max-width:100%;max-height:240px;border-radius:8px;margin-top:8px}
+
+.legal{max-width:760px;margin:0 auto;padding:24px 18px 48px;line-height:1.7}
+.legal h1{font-size:26px;margin:8px 0 6px}
+.legal h2{font-size:18px;margin:22px 0 8px}
+.legal p,.legal li{color:#cbd5e1}
+.legal nav{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 20px}
+.legal .warn{background:#422006;border:1px solid #854d0e;color:#fde68a;padding:12px 14px;border-radius:12px}
+.legal .todo{background:#1e293b;border-left:4px solid #f59e0b;padding:10px 12px;margin:12px 0;border-radius:0 10px 10px 0}
+.legal footer{margin-top:28px;color:#64748b;font-size:13px}
+
+.danger-btn{background:#7f1d1d;color:#fff;font-weight:600}
+.notice{background:#14532d;padding:10px;border-radius:10px;font-size:14px}

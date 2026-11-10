@@ -43,6 +43,7 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
   const sfx = Date.now().toString(36).slice(-5);
   const created = { users: [], channels: [], orgs: [] };
   let adminTok;
+  let demoSeatRestore = null;
   try {
     const h = await http('GET', '/api/health');
     ok('健康檢查', h.status === 200 && h.body.ok && h.body.storesAudio === false, JSON.stringify(h.body));
@@ -491,6 +492,38 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
       }
     }
 
+    // ===== 上架與刪除帳號 =====
+    const privacy = await (await fetch(BASE + '/privacy')).text();
+    const terms = await (await fetch(BASE + '/terms')).text();
+    const delPage = await (await fetch(BASE + '/delete-account')).text();
+    ok('隱私權政策頁說明位置、麥克風、照片 7 天、不存錄音與回報日誌', privacy.includes('【待填】') && privacy.includes('不保存任何錄音') && privacy.includes('7 天') && privacy.includes('問題回報') && privacy.includes('法律專業人士'));
+    ok('服務條款頁可開啟', terms.includes('服務條款') && terms.includes('【待填】') && terms.includes('不保存錄音'));
+    ok('刪除帳號說明頁提供 Play 要求的網頁入口', delPage.includes('刪除我的帳號') && delPage.includes('最後一位管理員') && delPage.includes('id="delForm"'));
+
+    const orgList = await http('GET', '/api/platform/orgs', null, adminTok);
+    const demoOrg = (orgList.body.orgs || []).find(o => o.code === 'DEMO');
+    if (demoOrg && (demoOrg.seatLimit || 0) < 50) {
+      demoSeatRestore = { id: demoOrg.id, seatLimit: demoOrg.seatLimit };
+      await http('PATCH', '/api/platform/orgs/' + demoOrg.id, { seatLimit: 50 }, adminTok);
+    }
+
+    const vic = await mk('vic', '將刪除', 'Vic-pass-123');
+    const tokVic = await login(vic.username, vic.password);
+    const vicMsg = await http('POST', '/api/messages', { conv: 'lobby', text: '刪除前留下的話' }, tokVic);
+    const delWrong = await http('POST', '/api/me/delete', { password: 'not-the-password' }, tokVic);
+    ok('刪除帳號時密碼錯誤會被拒絕', vicMsg.status === 201 && delWrong.status === 400 && delWrong.body.error === 'wrong_password');
+    const delVic = await http('POST', '/api/me/delete', { password: 'Vic-pass-123' }, tokVic);
+    const loginGone = await http('POST', '/api/login', { username: vic.username, password: 'Vic-pass-123', org: 'DEMO' });
+    const lobbyAfter = await http('GET', '/api/messages?conv=lobby', null, adminTok);
+    ok('使用者可刪除帳號且之後無法登入', delVic.status === 200 && loginGone.status === 401);
+    ok('已刪帳號的訊息會匿名化', (lobbyAfter.body.messages || []).some(m => m.text === '刪除前留下的話' && (m.from === 'deleted' || m.fromName === '已刪除的使用者')));
+    const delAdmin = await http('POST', '/api/me/delete', { password: ADMIN_P }, adminTok);
+    ok('平台管理員不能自助刪除', delAdmin.status === 400 && delAdmin.body.error === 'platform_admin');
+    const lastA = await mk('la', '末管', 'La-pass-123', 'org_admin');
+    const tokLA = await login(lastA.username, lastA.password);
+    const delLast = await http('POST', '/api/me/delete', { password: 'La-pass-123' }, tokLA);
+    ok('公司最後一位管理員不能自助刪除', delLast.status === 400 && delLast.body.error === 'last_admin', JSON.stringify(delLast.body));
+
     // ===== 不保存錄音 =====
     const hist = await http('GET', '/api/history?conv=lobby', null, adminTok), wav = await fetch(BASE + '/audio/0123456789abcdef.wav');
     const h2 = await http('GET', '/api/health');
@@ -523,6 +556,7 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
       for (const o of leftO) await http('DELETE', `/api/platform/orgs/${o.id}`, null, adminTok);
       const og2 = await http('GET', '/api/platform/orgs', null, adminTok);
       const leftO2 = (og2.body.orgs || []).filter(o => (o.code || '').includes(sfx.toUpperCase()) || (o.name || '').includes(sfx));
+      if (demoSeatRestore) await http('PATCH', '/api/platform/orgs/' + demoSeatRestore.id, { seatLimit: demoSeatRestore.seatLimit }, adminTok);
       await http('POST', '/api/logout', {}, adminTok);
       ok('清理：本次測試帳號、頻道與公司已刪除', !left.length && !leftC.length && !leftO2.length, `剩下使用者 ${us.body.users.map(u => u.username).join(',')}；頻道 ${cs.body.channels.map(c => c.name).join(',')}；公司 ${(og2.body.orgs || []).map(o => o.code).join(',')}`);
     }

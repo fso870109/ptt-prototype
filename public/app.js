@@ -170,6 +170,11 @@ async function ensureMic() {
   clearTimeout(micStopTimer);
   if (mic && mic.getAudioTracks().some(t => t.readyState === 'live')) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('此瀏覽器不支援麥克風（需 HTTPS）');
+  if (!S.micExplained) {
+    const ok = window.confirm('Geelo 需要使用麥克風，才能在你按住講話時把聲音即時傳給頻道成員。語音只即時傳送，不會被錄音保存。');
+    if (!ok) throw new Error('未允許使用麥克風');
+    S.micExplained = true;
+  }
   mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
   const c = audioCtx();
   micSrc = c.createMediaStreamSource(mic);
@@ -350,8 +355,13 @@ async function startLoc() {
 }
 function stopLoc() { if (geoWatch !== null) navigator.geolocation.clearWatch(geoWatch); geoWatch = null; clearInterval(locTimer); lastPos = null; $('#locStatus').textContent = '未分享'; }
 $('#shareLoc').addEventListener('change', (e) => {
-  store.shareLoc = e.target.checked;
-  if (e.target.checked) startLoc(); else { stopLoc(); wsSend({ t: 'loc_off' }); }
+  if (e.target.checked) {
+    const ok = window.confirm('開啟後，會把你目前的位置與電量分享給同頻道成員及公司管理員／調度員。系統只保留最新一筆位置，不建立移動軌跡。你可以隨時關閉。');
+    if (!ok) { e.target.checked = false; return; }
+    store.shareLoc = true; startLoc();
+  } else {
+    store.shareLoc = false; stopLoc(); wsSend({ t: 'loc_off' });
+  }
 });
 
 // ---------- 地圖（Leaflet + OpenStreetMap 圖磚）----------
@@ -840,6 +850,22 @@ if ($('#reportShot')) $('#reportShot').addEventListener('change', () => {
   $('#reportShotName').textContent = f ? (f.name + '（' + Math.round(f.size / 1024) + ' KB）') : '';
 });
 if ($('#openReport')) $('#openReport').addEventListener('click', () => { $('#reportErr').textContent = ''; $('#reportModal').classList.remove('hidden'); });
+if ($('#openDelete')) $('#openDelete').addEventListener('click', () => { $('#deleteErr').textContent = ''; $('#deletePassword').value = ''; $('#deleteModal').classList.remove('hidden'); });
+if ($('#deleteCancel')) $('#deleteCancel').addEventListener('click', () => $('#deleteModal').classList.add('hidden'));
+if ($('#deleteSend')) $('#deleteSend').addEventListener('click', async () => {
+  const password = $('#deletePassword').value;
+  if (!password) { $('#deleteErr').textContent = '請輸入密碼'; return; }
+  $('#deleteSend').disabled = true; $('#deleteErr').textContent = '';
+  try {
+    const r = await fetch('/api/me/delete', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { $('#deleteErr').textContent = j.message || '無法刪除'; return; }
+    store.token = '';
+    toast('帳號已刪除');
+    setTimeout(() => location.reload(), 800);
+  } catch { $('#deleteErr').textContent = '無法連線到伺服器'; }
+  finally { $('#deleteSend').disabled = false; }
+});
 if ($('#reportCancel')) $('#reportCancel').addEventListener('click', () => $('#reportModal').classList.add('hidden'));
 if ($('#reportSend')) $('#reportSend').addEventListener('click', async () => {
   const text = ($('#reportText').value || '').trim();

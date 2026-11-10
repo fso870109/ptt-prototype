@@ -29,6 +29,7 @@
     <button id="enter" class="primary" type="submit">登入</button>
     <p id="loginErr" class="err"></p>
     <p class="hint">請輸入公司代碼、帳號與密碼（帳號由公司管理員建立）。按「登入」時會啟用聲音播放；第一次按住講話時瀏覽器會詢問麥克風權限。</p>
+    <p class="hint"><a class="link" href="/privacy">隱私權政策</a> · <a class="link" href="/terms">服務條款</a> · <a class="link" href="/delete-account">刪除帳號</a></p>
   </form>
 </section>
 
@@ -74,6 +75,12 @@
     <p id="settingsConn" class="muted small">尚未連線</p>
     <button id="openReport" type="button" class="primary settings-btn">回報問題</button>
     <p class="muted small">回報會附上裝置與約 200 行連線事件（已過濾 token、密碼與音訊內容），保留 90 天。公司管理員可在後台查看。</p>
+    <h3 class="settings-h">帳號與條款</h3>
+    <p><a class="link" href="/privacy" target="_blank" rel="noopener">隱私權政策</a></p>
+    <p><a class="link" href="/terms" target="_blank" rel="noopener">服務條款</a></p>
+    <p><a class="link" href="/delete-account" target="_blank" rel="noopener">刪除帳號說明</a></p>
+    <button id="openDelete" type="button" class="settings-btn danger-btn">刪除我的帳號</button>
+    <p class="muted small">刪除需輸入密碼確認。伺服器會移除個人資料，訊息可能改為匿名顯示。公司最後一位管理員無法自助刪除。</p>
     <h3 class="settings-h">最近連線事件</h3>
     <pre id="eventLogPreview" class="event-log">（尚無紀錄）</pre>
   </div>
@@ -139,6 +146,18 @@
     <div class="modal-actions">
       <button type="button" id="reportCancel">取消</button>
       <button type="button" id="reportSend" class="primary">送出回報</button>
+    </div>
+  </div>
+</div>
+<div id="deleteModal" class="modal hidden" role="dialog" aria-labelledby="deleteTitle">
+  <div class="modal-card">
+    <h2 id="deleteTitle">刪除我的帳號</h2>
+    <p class="muted small">此動作無法復原。我們會刪除你的帳號與個人資料，並將你送出的文字訊息匿名化。語音本來就不會保存。</p>
+    <input id="deletePassword" type="password" maxlength="100" placeholder="輸入目前密碼以確認" autocomplete="current-password">
+    <p id="deleteErr" class="err"></p>
+    <div class="modal-actions">
+      <button type="button" id="deleteCancel">取消</button>
+      <button type="button" id="deleteSend" class="danger-btn">確認刪除</button>
     </div>
   </div>
 </div>

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>刪除帳號 · Geelo 吉洛</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+
+</head>
+<body>
+<article class="legal">
+  <p class="muted small"><a class="link" href="/">← 回到 Geelo</a></p>
+  <h1>刪除帳號</h1>
+  <p class="muted small">生效／更新日期：2026-11-10（Asia/Taipei）。本頁依目前實際功能撰寫，非正式法律意見。</p>
+  <div class="warn">本文件為產品說明草稿，建議在正式對外營運或上架商店前，交由法律專業人士審閱與調整。</div>
+  <div class="todo"><strong>營運者資訊（請填寫後再上架）：</strong><br>營運者名稱：【待填】<br>聯絡信箱：【待填】<br>地址：【待填】</div>
+  <nav>
+    <a class="link" href="/privacy">隱私權政策</a>
+    <a class="link" href="/terms">服務條款</a>
+    <a class="link" href="/delete-account">刪除帳號</a>
+  </nav>
+
+  <h2>如何刪除你的 Geelo 帳號</h2>
+  <p>Google Play 要求應用程式提供不需打開 App 也能申請刪除帳號的網頁入口。本頁即為該入口。你也可以在已登入的網站「設定」或 App「設定」中選擇「刪除我的帳號」。</p>
+
+  <h2>刪除後會發生什麼</h2>
+  <ul>
+    <li>你的帳號、顯示名稱、密碼雜湊、登入工作階段會被刪除，你會立即被登出。</li>
+    <li>你傳送的文字與字幕訊息會匿名化（例如顯示為「已刪除的使用者」），以維持其他人的對話脈絡。</li>
+    <li>問題回報與對講紀錄中的個人識別會匿名化；音訊本來就不會保存。</li>
+    <li>頻道成員資格、位置分享、iOS Push-to-Talk token 會被移除。</li>
+    <li>聊天照片仍依原規則最多保留 7 天，但不再與你的帳號連結。</li>
+  </ul>
+
+  <h2>限制</h2>
+  <ul>
+    <li>必須輸入正確密碼確認，以避免誤刪。</li>
+    <li>若你是該公司<strong>最後一位管理員</strong>，系統會拒絕刪除，以免公司無人管理。請先指定其他管理員，或請平台管理員刪除／停用公司。</li>
+    <li>平台管理員帳號無法透過此自助流程刪除，請聯絡營運者（信箱：【待填】）。</li>
+  </ul>
+
+  <h2>在此頁刪除（網頁入口）</h2>
+  <p>請輸入公司代碼、帳號與密碼。送出後將永久刪除，無法復原。</p>
+  <form id="delForm" class="login-card" style="margin:16px 0;text-align:left;max-width:420px">
+    <input id="org" name="organization" maxlength="16" placeholder="公司代碼" autocomplete="organization" autocapitalize="characters">
+    <input id="username" name="username" maxlength="32" placeholder="帳號" autocomplete="username" autocapitalize="none">
+    <input id="password" name="password" type="password" maxlength="100" placeholder="密碼" autocomplete="current-password">
+    <label class="chk" style="margin:10px 0"><input type="checkbox" id="sure"> 我了解此動作無法復原，並同意刪除我的帳號與相關個人資料</label>
+    <button class="primary" type="submit" id="delBtn">刪除我的帳號</button>
+    <p id="delErr" class="err"></p>
+    <p id="delOk" class="notice hidden">帳號已刪除。你現在可以關閉此頁。</p>
+  </form>
+  <p class="muted small">若你忘記密碼，請聯絡公司管理員重設，或寫信至【待填】。</p>
+  <script>
+  document.getElementById('delForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('delErr');
+    const ok = document.getElementById('delOk');
+    err.textContent = ''; ok.classList.add('hidden');
+    if (!document.getElementById('sure').checked) { err.textContent = '請先勾選確認'; return; }
+    const org = document.getElementById('org').value.trim();
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    if (!org || !username || !password) { err.textContent = '請輸入公司代碼、帳號與密碼'; return; }
+    document.getElementById('delBtn').disabled = true;
+    try {
+      const login = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ org, username, password }) });
+      const lj = await login.json().catch(() => ({}));
+      if (!login.ok) { err.textContent = lj.message || '登入失敗，無法刪除'; return; }
+      const del = await fetch('/api/me/delete', { method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+lj.token}, body: JSON.stringify({ password }) });
+      const dj = await del.json().catch(() => ({}));
+      if (!del.ok) { err.textContent = dj.message || '刪除失敗'; return; }
+      try { localStorage.removeItem('ptt_token'); } catch {}
+      ok.classList.remove('hidden');
+      document.getElementById('password').value = '';
+    } catch { err.textContent = '無法連線到伺服器'; }
+    finally { document.getElementById('delBtn').disabled = false; }
+  });
+  </script>
+
+  <footer>Geelo 吉洛 · 即時對講。語音只即時轉發，伺服器不保存錄音。</footer>
+</article>
+</body>
+</html>
