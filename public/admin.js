@@ -29,6 +29,7 @@ async function boot() {
 async function refresh() {
   const [u, c, a, s] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/channels'), api('GET', '/api/admin/alerts'), api('GET', '/api/admin/settings').catch(() => ({ settings: { saveCaptions: false } }))]);
   users = u.users; channels = c.channels; renderUsers(); renderChannels(); renderAlerts(a.alerts);
+  loadReports();
   const box = $('#saveCaptions');
   if (box) box.checked = !!(s.settings && s.settings.saveCaptions);
 }
@@ -135,3 +136,48 @@ $('#alertList').addEventListener('click', async (e) => { const b = e.target.clos
 setInterval(() => { if (me && me.role === 'admin' && !document.hidden) api('GET', '/api/admin/alerts').then(a => renderAlerts(a.alerts)).catch(() => {}); }, 5000);
 if ($('#org') && localStorage.getItem('ptt_org')) $('#org').value = localStorage.getItem('ptt_org');
 boot();
+
+function fmtTs(ts) { return ts ? new Date(ts).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' }) : ''; }
+async function shotUrl(path) {
+  const r = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) return '';
+  return URL.createObjectURL(await r.blob());
+}
+function renderReports(list, shotBase) {
+  const el = $('#rptList'); if (!el) return;
+  el.innerHTML = (list || []).map(r => {
+    const meta = r.meta || {};
+    const log = (r.log || []).join('\n');
+    return `<div class="rpt-item" data-id="${esc(r.id)}">
+      <div><b>${esc(r.displayName || r.username || '使用者')}</b> · ${esc(r.username || '')} · ${esc(fmtTs(r.ts))}
+        <span class="tag ${r.status === 'handled' ? 'on' : ''}">${r.status === 'handled' ? '已處理' : '未處理'}</span>
+        ${r.hasScreenshot ? '<span class="tag">有截圖</span>' : ''}</div>
+      <p>${esc(r.text)}</p>
+      <p class="muted small">${esc([meta.platform, meta.device, meta.os, meta.appVersion, meta.browser].filter(Boolean).join(' · '))}</p>
+      ${r.note ? `<p class="muted small">備註：${esc(r.note)}</p>` : ''}
+      ${log ? `<details><summary>連線事件日誌</summary><pre>${esc(log)}</pre></details>` : ''}
+      ${r.hasScreenshot ? `<img alt="截圖" data-shot="${esc(shotBase + '/' + r.id + '/screenshot')}">` : ''}
+      <div class="ch-add" style="margin-top:8px">
+        ${r.status === 'handled' ? `<button data-rpt="open">標為未處理</button>` : `<button data-rpt="handled">標記已處理</button>`}
+      </div>
+    </div>`;
+  }).join('') || '<p class="muted">目前沒有回報</p>';
+  el.querySelectorAll('img[data-shot]').forEach(img => { shotUrl(img.dataset.shot).then(src => { if (src) img.src = src; }); });
+}
+async function loadReports() {
+  if (!$('#rptList')) return;
+  const st = ($('#rptFilter') && $('#rptFilter').value) || '';
+  const q = st ? ('?status=' + encodeURIComponent(st)) : '';
+  try {
+    const j = await api('GET', '/api/admin/reports' + q);
+    renderReports(j.reports, '/api/admin/reports');
+  } catch {}
+}
+if ($('#rptRefresh')) $('#rptRefresh').addEventListener('click', loadReports);
+if ($('#rptFilter')) $('#rptFilter').addEventListener('change', loadReports);
+if ($('#rptList')) $('#rptList').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-rpt]'); if (!b) return;
+  const id = b.closest('.rpt-item').dataset.id;
+  await api('PATCH', '/api/admin/reports/' + id, { status: b.dataset.rpt });
+  toast('已更新回報狀態'); loadReports();
+});

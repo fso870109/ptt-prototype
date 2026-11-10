@@ -46,6 +46,7 @@
     <button data-tab="members">成員</button>
     <button data-tab="dms">私訊</button>
     <button data-tab="map">地圖</button>
+    <button data-tab="settings">設定</button>
   </nav>
 
   <div class="panel" id="tab-channels">
@@ -67,6 +68,14 @@
     </div>
     <div id="map"></div>
     <ul id="locList" class="list loc-list"></ul>
+  </div>
+  <div class="panel hidden" id="tab-settings">
+    <p class="muted small">連線狀態會顯示在上方；訊號品質依往返延遲（RTT）估算。</p>
+    <p id="settingsConn" class="muted small">尚未連線</p>
+    <button id="openReport" type="button" class="primary settings-btn">回報問題</button>
+    <p class="muted small">回報會附上裝置與約 200 行連線事件（已過濾 token、密碼與音訊內容），保留 90 天。公司管理員可在後台查看。</p>
+    <h3 class="settings-h">最近連線事件</h3>
+    <pre id="eventLogPreview" class="event-log">（尚無紀錄）</pre>
   </div>
 
   <div class="target">
@@ -119,6 +128,20 @@
   </div>
 </div>
 
+<div id="reportModal" class="modal hidden" role="dialog" aria-labelledby="reportTitle">
+  <div class="modal-card">
+    <h2 id="reportTitle">回報問題</h2>
+    <p class="muted small">請描述發生了什麼。可選擇附上截圖。系統會自動附上裝置型號、系統、瀏覽器與最近的連線事件日誌（不含 token、密碼或語音內容）。</p>
+    <textarea id="reportText" maxlength="2000" rows="6" placeholder="請描述問題…"></textarea>
+    <label class="file-label">附上截圖（選填，JPEG／PNG／WebP，約 300KB 以內）<input type="file" id="reportShot" accept="image/jpeg,image/png,image/webp"></label>
+    <p id="reportShotName" class="muted small"></p>
+    <p id="reportErr" class="err"></p>
+    <div class="modal-actions">
+      <button type="button" id="reportCancel">取消</button>
+      <button type="button" id="reportSend" class="primary">送出回報</button>
+    </div>
+  </div>
+</div>
 <div id="toast" class="toast hidden"></div>
 <script src="/vendor/leaflet/leaflet.js"></script>
 <script src="/app.js"></script>

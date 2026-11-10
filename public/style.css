@@ -107,3 +107,18 @@ a.link,a.link:visited{color:#38bdf8;text-decoration:none}
 .stt-hint{margin:8px 16px 0;text-align:center;line-height:1.45}
 .chat li.caption .body{color:#99f6e4}
 .chat li.caption .badge{display:inline-block;font-size:11px;padding:1px 6px;border-radius:999px;background:#134e4a;color:#ccfbf1;margin-right:6px}
+
+.dot.ok{background:#84cc16;box-shadow:0 0 8px #84cc16}
+.settings-btn{width:100%;margin:8px 0}
+.settings-h{font-size:15px;margin:16px 0 6px}
+.event-log{background:#1e293b;border-radius:10px;padding:10px;font-size:11px;line-height:1.45;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#cbd5e1}
+.modal{position:fixed;inset:0;z-index:3000;background:rgba(2,6,23,.72);display:flex;align-items:center;justify-content:center;padding:16px}
+.modal-card{background:#0f172a;border:1px solid #334155;border-radius:16px;padding:18px;max-width:480px;width:100%;max-height:90vh;overflow:auto}
+.modal-card h2{margin:0 0 8px}
+.modal-card textarea{width:100%;min-height:120px;font-size:15px;padding:10px 12px;border-radius:12px;border:1px solid #334155;background:#1e293b;color:#f1f5f9;margin:10px 0;font-family:inherit}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+.file-label{display:block;font-size:13px;color:#94a3b8;margin:8px 0}
+.file-label input{display:block;margin-top:6px;width:100%}
+.rpt-item{border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:10px}
+.rpt-item pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:#0f172a;padding:8px;border-radius:8px;max-height:160px;overflow:auto}
+.rpt-item img{max-width:100%;max-height:240px;border-radius:8px;margin-top:8px}

@@ -256,7 +256,8 @@ wss://<host>/ws
 - 客戶端應把 `binaryType` 設成 `arraybuffer`（瀏覽器）或等價設定
 - 伺服器每 10 秒送 WebSocket ping；請回應 pong（大多數函式庫自動處理）
 - 建議客戶端每 15 秒送 `{ "t": "ping", "ts": <epochMs> }`，會收到 `{ "t": "pong", "ts": <原值> }`。若 8 秒內沒收到 pong 可自行重連
-- 斷線後請用指數退避重連（建議 1s 起、上限約 10s），重連後重新 `hello` + `join`
+- 斷線後請用指數退避加重試抖動重連（建議 1s 起、上限約 10s，延遲乘上約 0.7–1.3 的隨機係數）。裝置從離線恢復或 Wi-Fi／行動網路切換時應主動重連。
+- 重連後送 `hello`，可帶 `resume.channel` 讓伺服器用同一 token 快速恢復 session 並自動重新加入頻道；若省略，伺服器會使用該使用者上次成功加入的頻道。客戶端應恢復 UI 狀態、重送斷線期間排隊的文字訊息。若斷線時正在講話，伺服器會以 `talk_end.reason = "disconnect"` 釋放發言權，客戶端應提示使用者。
 
 關閉代碼：`4001` 認證失敗或逾時；`4003` 帳號被停用／密碼已重設。
 
@@ -266,8 +267,9 @@ wss://<host>/ws
 
 #### `hello`（連線後第一則，必送）
 ```json
-{ "t": "hello", "token": "<Bearer token 同一字串>" }
+{ "t": "hello", "token": "<Bearer token 同一字串>", "resume": { "channel": "lobby" } }
 ```
+`resume.channel` 可省略。成功時 `welcome.resumedChannel` 為恢復後的頻道 id（沒有則為 `null`），並可能接著收到 `joined`（`resumed: true`）。
 
 #### `join` — 切換目前頻道
 ```json
@@ -526,8 +528,9 @@ wss://<host>/ws
 
 #### `pong`
 ```json
-{ "t": "pong", "ts": 1731200000000 }
+{ "t": "pong", "ts": 1731200000000, "serverTime": 1731200000123 }
 ```
+`ts` 原樣返回，客戶端可用 `now - ts` 估算 RTT 並顯示訊號品質。
 
 #### `listening`
 ```json
@@ -795,3 +798,42 @@ offset 4: pcm s16le ...          —— 與發送端送出的位元組相同
 13. 背景／鎖屏收聽**無法**靠本網頁協定完成：iOS 需 PushToTalk framework，Android 需前景服務。本協定在 App 回到前景時重連即可補上成員與文字狀態，但錯過的語音無法補聽
 
 背景限制與音訊解鎖細節見專案根目錄 `README.md`。
+
+
+---
+
+## 12. 問題回報
+
+使用者可從網頁或 App 送出問題回報。伺服器存在 Postgres 資料表 `ptt_reports`（本機開發則為 `data/reports.json` 與 `data/report-shots/`），**保留 90 天**後自動清除。不保存語音或錄音。
+
+### `POST /api/reports`（需登入）
+
+```json
+{
+  "text": "問題說明（必填，最多 2000 字）",
+  "screenshot": "<選填，JPEG／PNG／WebP 的 raw base64，上限約 300KB>",
+  "meta": { "platform": "web|android|ios", "device": "型號", "os": "系統版本", "appVersion": "0.4.0", "browser": "", "userAgent": "" },
+  "log": ["最近約 200 行用戶端連線事件，每行最多 400 字"]
+}
+```
+
+成功 `201 { "report": { "id", "text", "meta", "log", "hasScreenshot", "status": "open", "ts" } }`。  
+伺服器會過濾日誌與 metadata 中的 token、密碼、Authorization 等敏感欄位，也不接受音訊內容。頻率限制：同一使用者每小時 5 則、同一 IP 每小時 15 則（`429 too_many`）。截圖過大回 `413 too_large`。
+
+### 公司後台
+
+- `GET /api/admin/reports` — 列出自己公司的回報（query：`status`、`since`、`limit`）
+- `GET /api/admin/reports/:id`
+- `GET /api/admin/reports/:id/screenshot` — 需 Bearer，不要把 token 放進 URL
+- `PATCH /api/admin/reports/:id` `{ "status": "handled"|"open", "note": "選填" }`
+- `DELETE /api/admin/reports/:id`
+
+### 平台後台與匯出 API
+
+- `GET /api/platform/reports` — 全部公司（query 同上，另可 `orgId`）
+- `GET /api/platform/reports/export` — 管理員專用匯出（JSON：`reports` + `exportedAt`）
+- `GET /api/platform/reports/:id`、`.../:id/screenshot`
+- `PATCH /api/platform/reports/:id` — 標記已處理
+- `DELETE /api/platform/reports/:id`
+
+健康檢查 `GET /api/health` 另含 `reportsRetentionDays`（90）。

@@ -12,6 +12,34 @@ const store = {
 };
 const ROLE_LABEL = { supervisor: '主管', member: '一般', listener: '只聽' };
 
+function redactClient(s) {
+  return String(s ?? '')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ***')
+    .replace(/"(token|password|oldPassword|newPassword|authorization|cookie)"\s*:\s*"[^"]*"/gi, '"$1":"***"')
+    .replace(/\b(token|password|authorization)=([^\s&]+)/gi, '$1=***');
+}
+const EventLog = {
+  lines: [],
+  add(kind, detail) {
+    const msg = redactClient('[' + kind + '] ' + (detail || ''));
+    this.lines.push(new Date().toISOString() + ' ' + msg);
+    if (this.lines.length > 200) this.lines.shift();
+    const box = document.getElementById('eventLogPreview');
+    if (box) box.textContent = this.lines.slice(-24).join('\n');
+  },
+  dump() { return this.lines.slice(); }
+};
+function deviceMeta() {
+  const ua = navigator.userAgent || '';
+  let os = '';
+  if (/Android/i.test(ua)) os = 'Android';
+  else if (/iPhone|iPad|iPod/i.test(ua)) os = 'iOS';
+  else if (/Mac OS X/i.test(ua)) os = 'macOS';
+  else if (/Windows/i.test(ua)) os = 'Windows';
+  else if (/Linux/i.test(ua)) os = 'Linux';
+  return { platform: 'web', device: navigator.platform || '', os, appVersion: 'web', browser: ua.slice(0, 120), userAgent: ua.slice(0, 240) };
+}
+
 const S = {
   ws: null, connected: false, retry: 0, me: null, myId: '',
   channels: [], channel: '', members: [], online: [], dms: [],
@@ -20,7 +48,7 @@ const S = {
   activeTalks: new Map(),  // conv -> {from, fromName, streamId}
   pressing: false, granted: false, streamId: 0, pending: [], pendingConv: '',
   alerts: new Map(), ackedAlerts: new Set(), locs: new Map(),
-  chat: [], chatConv: '',
+  chat: [], chatConv: '', chatQueue: [],
 };
 function speechEngine() { return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
 function updateSttHint() {
@@ -123,7 +151,15 @@ function playPcm(streamId, int16) {
   buf.copyToChannel ? buf.copyToChannel(f, 0) : buf.getChannelData(0).set(f);
   const src = c.createBufferSource(); src.buffer = buf; src.connect(c.destination);
   const now = c.currentTime;
-  if (st.nextTime < now + 0.05) st.nextTime = now + 0.18; // 起播 / 斷流後重新留 180ms 抖動緩衝
+  if (st.nextTime < now + 0.04) {
+    st.underruns = (st.underruns || 0) + 1;
+    st.targetJitter = Math.min(0.40, 0.18 + st.underruns * 0.03);
+    st.nextTime = now + st.targetJitter; // 起播或發生欠載時加大抖動緩衝，吸收少量遲到／丟包
+  } else if (st.underruns > 0 && st.nextTime > now + 0.22) {
+    st.underruns -= 1;
+    st.targetJitter = Math.min(0.40, 0.18 + st.underruns * 0.03);
+  }
+  if (st.nextTime > now + 0.85) st.nextTime = now + (st.targetJitter || 0.18);
   src.start(st.nextTime);
   st.nextTime += buf.duration;
 }
@@ -345,38 +381,105 @@ setInterval(() => { if (!$('#tab-map').classList.contains('hidden')) renderLocs(
 
 // ---------- WebSocket ----------
 function wsSend(o) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); }
-function setConn(state, text) { $('#connDot').className = 'dot ' + state; $('#connText').textContent = text; S.connected = state === 'on'; updatePttEnabled(); }
+function updateConnQuality() {
+  if (!S.connected) return;
+  const rtt = S.rtt;
+  let q = '訊號未知', cls = 'on';
+  if (typeof rtt === 'number') {
+    if (rtt < 80) { q = `訊號良好（${rtt} ms）`; cls = 'on'; }
+    else if (rtt < 200) { q = `訊號尚可（${rtt} ms）`; cls = 'ok'; }
+    else { q = `訊號較弱（${rtt} ms）`; cls = 'wait'; }
+  }
+  $('#connDot').className = 'dot ' + cls;
+  $('#connText').textContent = '已連線 · ' + q;
+  const sc = $('#settingsConn');
+  if (sc) sc.textContent = $('#connText').textContent + (S.chatQueue.length ? ` · 待重送 ${S.chatQueue.length} 則文字` : '');
+}
+function setConn(state, text) {
+  $('#connDot').className = 'dot ' + state;
+  $('#connText').textContent = text;
+  S.connected = state === 'on';
+  updatePttEnabled();
+  const sc = $('#settingsConn');
+  if (sc) sc.textContent = text;
+}
+function retryDelay() {
+  const base = Math.min(10000, 1000 * Math.pow(1.6, S.retry));
+  S.retry += 1;
+  return Math.round(base * (0.7 + Math.random() * 0.6));
+}
+function releaseTalkOnDisconnect() {
+  const granted = S.granted;
+  const was = S.pressing || S.granted;
+  if (!was) return;
+  S.pressing = false; S.granted = false; S.pending = [];
+  stopCaptions();
+  btn.classList.remove('pressing', 'talking');
+  $('#meterBar').style.width = '0';
+  if (granted) toast('連線中斷，已安全結束發話（發言權已釋放）');
+  else toast('連線中斷，發話尚未送出');
+  EventLog.add('talk', 'released on disconnect granted=' + granted);
+}
 function connect() {
   clearTimeout(connect.timer);
   if (!store.token) return showLogin();
+  if (S.ws && (S.ws.readyState === 0 || S.ws.readyState === 1)) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = 'arraybuffer'; S.ws = ws;
   setConn('wait', S.retry ? `重新連線中…（第 ${S.retry} 次）` : '連線中…');
-  ws.onopen = () => { S.retry = 0; ws.send(JSON.stringify({ t: 'hello', token: store.token })); };
+  EventLog.add('ws', S.retry ? 'reconnect attempt ' + S.retry : 'connecting');
+  ws.onopen = () => {
+    EventLog.add('ws', 'open, hello+resume');
+    ws.send(JSON.stringify({ t: 'hello', token: store.token, resume: { channel: store.channel || undefined } }));
+  };
   ws.onmessage = (ev) => {
     if (typeof ev.data !== 'string') { const sid = new DataView(ev.data).getUint32(0); playPcm(sid, new Int16Array(ev.data.slice(4))); return; }
     handle(JSON.parse(ev.data));
   };
   ws.onclose = (ev) => {
     if (S.ws !== ws) return;
-    if (S.pressing) pttUp();
+    releaseTalkOnDisconnect();
     S.activeTalks.clear(); updateTalkStatus();
+    EventLog.add('ws', 'close code=' + ev.code);
     if (ev.code === 4001 || ev.code === 4003 || S.authFailed) { S.authFailed = false; setConn('off', '請重新登入'); return; }
-    const d = Math.min(10000, 1000 * Math.pow(1.6, S.retry++));
+    const d = retryDelay();
     setConn('off', `已斷線，${Math.round(d / 1000)} 秒後重連`);
     connect.timer = setTimeout(connect, d);
   };
-  ws.onerror = () => {};
+  ws.onerror = () => { EventLog.add('ws', 'error'); };
+}
+function forceReconnect(reason) {
+  if (!store.token) return;
+  EventLog.add('net', reason || 'force reconnect');
+  S.retry = 0;
+  if (S.granted) { try { wsSend({ t: 'ptt_stop' }); } catch {} }
+  releaseTalkOnDisconnect();
+  const old = S.ws;
+  S.ws = null;
+  if (old) { try { old.close(4000, 'reconnect'); } catch {} }
+  connect();
 }
 setInterval(() => {
   if (!S.ws || S.ws.readyState !== 1) return;
   const ts = Date.now(); wsSend({ t: 'ping', ts });
-  setTimeout(() => { if (S.lastPong < ts && S.ws && S.ws.readyState === 1) { try { S.ws.close(); } catch {} } }, 8000);
+  setTimeout(() => { if (S.lastPong < ts && S.ws && S.ws.readyState === 1) { EventLog.add('ws', 'ping timeout'); try { S.ws.close(); } catch {} } }, 8000);
 }, 15000);
 S.lastPong = Date.now();
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.token && (!S.ws || S.ws.readyState > 1)) { S.retry = 0; connect(); } });
-window.addEventListener('online', () => { if (store.token && (!S.ws || S.ws.readyState > 1)) { S.retry = 0; connect(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.token && (!S.ws || S.ws.readyState > 1)) { EventLog.add('net', 'visible'); S.retry = 0; connect(); } });
+window.addEventListener('online', () => { EventLog.add('net', 'online'); if (store.token) { S.retry = 0; if (!S.ws || S.ws.readyState > 1) connect(); } });
+window.addEventListener('offline', () => { EventLog.add('net', 'offline'); setConn('off', '裝置離線'); });
+if (navigator.connection && navigator.connection.addEventListener) {
+  let lastNet = navigator.connection.type || '';
+  navigator.connection.addEventListener('change', () => {
+    const t = navigator.connection.type || navigator.connection.effectiveType || '';
+    EventLog.add('net', 'connection ' + t + ' downlink=' + (navigator.connection.downlink || ''));
+    if (navigator.connection.type && navigator.connection.type !== lastNet) {
+      lastNet = navigator.connection.type;
+      forceReconnect('network type ' + lastNet);
+    }
+  });
+}
 
 function handle(m) {
   switch (m.t) {
@@ -390,16 +493,25 @@ function handle(m) {
       $('#adminLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'org_admin');
       $('#dispatchLink').classList.toggle('hidden', m.user.role !== 'admin' && m.user.role !== 'org_admin' && m.user.role !== 'dispatcher');
       $('#callDispatch').classList.toggle('hidden', m.user.role === 'admin' || m.user.role === 'org_admin' || m.user.role === 'dispatcher');
+      S.retry = 0;
       setConn('on', '已連線');
+      EventLog.add('ws', 'welcome resumed=' + (m.resumedChannel || ''));
       S.alerts = new Map((m.alerts || []).map(a => [a.id, a])); renderAlerts();
       renderChannels(); renderDms(); renderOthers();
-      { const want = S.channel || store.channel || 'lobby';
+      { const want = store.channel || m.resumedChannel || S.channel || 'lobby';
         const ok = S.channels.some(c => c.id === want) ? want : (S.channels[0] && S.channels[0].id);
-        if (ok) wsSend({ t: 'join', channel: ok }); else { S.target = null; renderTarget(); } }
+        if (m.resumedChannel && m.resumedChannel === ok) { /* 伺服器已用 token 快速恢復頻道 */ }
+        else if (ok) wsSend({ t: 'join', channel: ok });
+        else { S.target = null; renderTarget(); } }
       if (store.shareLoc) { $('#shareLoc').checked = true; if (geoWatch === null) startLoc(); else sendLoc(true); }
       renderActivity();
+      flushChatQueue();
       break;
-    case 'pong': S.lastPong = Date.now(); break;
+    case 'pong':
+      S.lastPong = Date.now();
+      if (m.ts) S.rtt = Math.max(0, Date.now() - m.ts);
+      updateConnQuality();
+      break;
     case 'channels': S.channels = m.channels; renderChannels(); renderTarget(); break;
     case 'joined': {
       if (!m.channel) { S.channel = ''; S.target = null; renderTarget(); toast('你已沒有任何頻道的權限'); break; }
@@ -625,13 +737,32 @@ async function compressImage(file) {
   let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
   return { mime: blob.type || type, data: btoa(bin), bytes: blob.size };
 }
-async function sendChatText(text) {
-  const conv = currentConv(); if (!conv) return toast('請先選擇頻道');
+async function sendChatText(text, convOpt) {
+  const conv = convOpt || currentConv(); if (!conv) return toast('請先選擇頻道');
   text = String(text || '').trim(); if (!text) return;
-  const r = await fetch('/api/messages', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ conv, text }) });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) return toast(j.message || '送出失敗');
-  if (j.message && !S.chat.some(x => x.id === j.message.id)) { S.chat.push(j.message); renderChat(); }
+  if (!S.connected || !store.token) {
+    S.chatQueue.push({ text, conv });
+    EventLog.add('chat', 'queued while offline n=' + S.chatQueue.length);
+    toast('目前斷線，文字會在重連後自動送出（' + S.chatQueue.length + '）');
+    return;
+  }
+  try {
+    const r = await fetch('/api/messages', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ conv, text }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return toast(j.message || '送出失敗');
+    if (j.message && conv === currentConv() && !S.chat.some(x => x.id === j.message.id)) { S.chat.push(j.message); renderChat(); }
+    EventLog.add('chat', 'sent');
+  } catch (err) {
+    S.chatQueue.push({ text, conv });
+    EventLog.add('chat', 'queue after error');
+    toast('送出失敗，已加入重送佇列');
+  }
+}
+async function flushChatQueue() {
+  if (!S.chatQueue.length || !S.connected) return;
+  const q = S.chatQueue.splice(0);
+  EventLog.add('chat', 'flush ' + q.length);
+  for (const item of q) await sendChatText(item.text, item.conv);
 }
 async function sendChatPhoto(file) {
   const conv = currentConv(); if (!conv) return toast('請先選擇頻道');
@@ -649,7 +780,7 @@ async function sendChatPhoto(file) {
 // ---------- 事件 ----------
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
-  ['channels', 'members', 'dms', 'map'].forEach(t => $('#tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
+  ['channels', 'members', 'dms', 'map', 'settings'].forEach(t => $('#tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
   if (b.dataset.tab === 'map') { ensureMap(); setTimeout(() => { map && map.invalidateSize(); renderLocs(); fitMap(); }, 50); wsSend({ t: 'get_locs' }); }
 }));
 $('#channelList').addEventListener('click', (e) => { const li = e.target.closest('li[data-ch]'); if (!li) return; if (li.dataset.ch === S.channel) { const c = S.channels.find(x => x.id === S.channel); S.target = { type: 'channel', id: S.channel, name: c ? c.name : '' }; renderTarget(); renderActivity(); } else wsSend({ t: 'join', channel: li.dataset.ch }); });
@@ -693,4 +824,40 @@ if (store.token) {
   toast('點一下畫面任一處以啟用聲音');
   document.addEventListener('pointerdown', function once() { unlockAudio(); document.removeEventListener('pointerdown', once); });
 }
+async function fileToReportShot(file) {
+  if (!file) return null;
+  if (file.size <= 300 * 1024 && /^image\/(jpeg|png|webp)$/.test(file.type)) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    return btoa(bin);
+  }
+  const packed = await compressImage(file);
+  if (packed.bytes > 300 * 1024) throw new Error('截圖請再壓縮到約 300KB 以內');
+  return packed.data;
+}
+if ($('#reportShot')) $('#reportShot').addEventListener('change', () => {
+  const f = $('#reportShot').files && $('#reportShot').files[0];
+  $('#reportShotName').textContent = f ? (f.name + '（' + Math.round(f.size / 1024) + ' KB）') : '';
+});
+if ($('#openReport')) $('#openReport').addEventListener('click', () => { $('#reportErr').textContent = ''; $('#reportModal').classList.remove('hidden'); });
+if ($('#reportCancel')) $('#reportCancel').addEventListener('click', () => $('#reportModal').classList.add('hidden'));
+if ($('#reportSend')) $('#reportSend').addEventListener('click', async () => {
+  const text = ($('#reportText').value || '').trim();
+  if (!text) { $('#reportErr').textContent = '請填寫問題說明'; return; }
+  $('#reportSend').disabled = true; $('#reportErr').textContent = '';
+  try {
+    let screenshot = null;
+    const f = $('#reportShot').files && $('#reportShot').files[0];
+    if (f) screenshot = await fileToReportShot(f);
+    const r = await fetch('/api/reports', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ text, screenshot, meta: deviceMeta(), log: EventLog.dump() }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { $('#reportErr').textContent = j.message || '送出失敗'; return; }
+    $('#reportText').value = ''; $('#reportShot').value = ''; $('#reportShotName').textContent = '';
+    $('#reportModal').classList.add('hidden');
+    toast('已送出回報，謝謝');
+    EventLog.add('report', 'submitted ' + (j.report && j.report.id || ''));
+  } catch (err) { $('#reportErr').textContent = err.message || '送出失敗'; }
+  finally { $('#reportSend').disabled = false; }
+});
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

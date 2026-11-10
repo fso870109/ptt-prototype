@@ -13,6 +13,10 @@ const { Media, PHOTO_MAX_BYTES, PHOTO_RETENTION_MS, PHOTO_QUOTA_BYTES, TEXT_MAX,
 const Orgs = require('./lib/orgs');
 const Billing = require('./lib/billing');
 const Stt = require('./lib/stt');
+const { Reports } = require('./lib/reports');
+const { CallLog } = require('./lib/calllog');
+const Apns = require('./lib/apns');
+const createExtra = require('./lib/http-extra');
 
 const PORT = +process.env.PORT || 8800;
 const PUB = path.join(__dirname, 'public');
@@ -27,6 +31,9 @@ const ALERT_PRIO = 100;
 
 const store = new Store({ databaseUrl: process.env.DATABASE_URL || '', dataDir: process.env.DATA_DIR || path.join(__dirname, 'data') });
 const media = new Media(store);
+const reports = new Reports(store);
+const callLog = new CallLog(store);
+const apns = new Apns.Apns();
 const D = () => store.doc;
 const now = () => Date.now();
 const uid = (n = 8) => crypto.randomBytes(n).toString('hex');
@@ -258,6 +265,23 @@ function endFloor(conv, reason, extra = {}) {
     let toName; if (isDm(conv)) toName = nameOf(dmParts(conv).find(x => x !== f.userId));
     info = { from: f.userId, fromName: nameOf(f.userId), toName, ts: f.startedAt, durMs: Math.round(f.bytes / 2 / SAMPLE_RATE * 1000) };
     lastTalk.set(conv, info);
+    const kind = isDm(conv) ? 'dm' : 'channel';
+    const ch = kind === 'channel' ? chById(conv) : null;
+    const peerId = kind === 'dm' ? dmParts(conv).find(x => x !== f.userId) : null;
+    const speaker = userById(f.userId);
+    callLog.add({
+      id: 'k' + uid(8),
+      orgId: (speaker && (speaker.orgId || orgIdOf(speaker))) || (ch && ch.orgId) || null,
+      conv, kind,
+      channelId: ch ? ch.id : null,
+      channelName: ch ? ch.name : '',
+      peerId: peerId || null,
+      peerName: peerId ? nameOf(peerId) : (info.toName || ''),
+      from: f.userId, fromName: nameOf(f.userId),
+      startedAt: f.startedAt, durMs: info.durMs,
+      preempted: reason === 'preempted',
+      ts: now()
+    }).catch(e => console.error('[calllog]', e.message));
   }
   broadcastConv(conv, { t: 'talk_end', conv, streamId: f.streamId, from: f.userId, reason, lastTalk: info, ...extra });
   if (info && !isDm(conv)) for (const id of online.keys()) { const u = userById(id); if (u && roleIn(u, chById(conv))) sendUser(id, { t: 'channel_activity', channel: conv, last: info.ts, lastTalk: info }); }
@@ -318,8 +342,54 @@ function endAlert(a, byUser) {
   console.log('[alert] end', a.id, byUser && byUser.username);
 }
 
+function upsertPttPush(rec) {
+  D().pttPush = D().pttPush || [];
+  D().pttPush = D().pttPush.filter(x => !(x.userId === rec.userId && String(x.channelId || '') === String(rec.channelId || '')));
+  D().pttPush.push(rec);
+}
+function removePttPush(userId, channelId) {
+  D().pttPush = (D().pttPush || []).filter(x => {
+    if (x.userId !== userId) return true;
+    if (channelId) return String(x.channelId || '') !== String(channelId);
+    return false;
+  });
+}
+async function notifyTalkStart(conv, fromUser, streamId) {
+  if (!Apns.enabled()) return;
+  const list = D().pttPush || [];
+  const targets = list.filter(x => {
+    if (x.userId === fromUser.id) return false;
+    if (isOnline(x.userId)) return false;
+    if (isDm(conv)) return dmParts(conv).includes(x.userId);
+    return x.channelId === conv;
+  });
+  for (const tgt of targets) {
+    try {
+      const r = await apns.send({
+        token: tgt.token,
+        bundle: tgt.bundleId,
+        payload: { activeSpeaker: fromUser.displayName, conv, from: fromUser.id, fromName: fromUser.displayName, streamId }
+      });
+      if (r && r.unregistered) removePttPush(tgt.userId, tgt.channelId);
+    } catch (e) { console.error('[apns] send', e.message); }
+  }
+}
+function inviteAbsUrl(req, code) {
+  const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+  return proto + '://' + host + '/join?code=' + encodeURIComponent(code);
+}
+async function qrSvg(text) {
+  const QR = require('qrcode');
+  return QR.toString(text, { type: 'svg', margin: 1, width: 256, errorCorrectionLevel: 'M' });
+}
+function rememberChannel(u, chId) {
+  const raw = userById(u.id);
+  if (raw && raw.lastChannel !== chId) { raw.lastChannel = chId; store.save().catch(() => {}); }
+}
+
 // ---------- HTTP ----------
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml', '.csv': 'text/csv; charset=utf-8' };
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -337,6 +407,15 @@ function bearer(req) { const h = req.headers.authorization || ''; return h.start
 const loginFails = new Map(); // key -> {n, until}
 function rateLimited(key) { const r = loginFails.get(key); return r && r.n >= 10 && r.until > now(); }
 function noteFail(key) { const r = loginFails.get(key) || { n: 0, until: 0 }; if (r.until < now()) r.n = 0; r.n++; r.until = now() + 10 * 60e3; loginFails.set(key, r); }
+
+const extra = createExtra({
+  json, readBody, cors, uid, now, store, reports, callLog, media,
+  D, userById, userByName, orgById, orgByCode, chById, orgIdOf,
+  publicUser, nameOf, roleIn, canAccess, isOrgManager, isPlatform, isDispatcher,
+  seatCount, seatLimit, orgUsable, validUsername, cleanName, A, Orgs,
+  revokeSessions, kick, locations, online, broadcastOnline, pushChannelsAll,
+  upsertPttPush, removePttPush, inviteAbsUrl, qrSvg
+});
 
 
 function orgDetail(o) {
@@ -356,6 +435,10 @@ async function wipeOrg(orgId) {
   for (const id of ids) { revokeSessions(id); kick(id); online.delete(id); locations.delete(id); }
   D().users = D().users.filter(u => u.orgId !== orgId);
   D().channels = D().channels.filter(c => c.orgId !== orgId);
+  D().invites = (D().invites || []).filter(i => i.orgId !== orgId);
+  D().pttPush = (D().pttPush || []).filter(x => !ids.includes(x.userId));
+  reports.deleteByOrg(orgId).catch(e => console.error('[reports]', e.message));
+  callLog.deleteByOrg(orgId).catch(e => console.error('[calllog]', e.message));
   await media.deleteConvs(convs).catch(e => console.error('[media]', e.message));
   D().orgs = D().orgs.filter(o => o.id !== orgId);
 }
@@ -363,6 +446,8 @@ async function platformApi(req, res, p, method, me) {
   const seg = p.split('/').slice(3); // after /api/platform/
   const b = (method === 'POST' || method === 'PATCH' || method === 'PUT') ? await readBody(req) : {};
   if (b === null) return json(res, 400, { error: 'bad_request' });
+  const platExtra = await extra.platformExtra(req, res, seg, method, me, b);
+  if (platExtra !== false) return platExtra;
   if (seg[0] === 'plans' && !seg[1] && method === 'GET') return json(res, 200, { plans: D().plans, example: true, message: '金額為可調整的範例佔位值，未接真實金流' });
   if (seg[0] === 'plans' && !seg[1] && method === 'PATCH') {
     for (const key of ['free', 'standard', 'pro']) {
@@ -467,8 +552,9 @@ async function api(req, res, p, url) {
   const method = req.method;
   if (p === '/api/health') {
     const ms = await media.stats();
-    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, orgs: D().orgs.length, activeTalks: floors.size, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, serverStt: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES });
+    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, orgs: D().orgs.length, activeTalks: floors.size, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, serverStt: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES, reportsRetentionDays: 90, callLogRetentionDays: 90, apns: Apns.enabled() });
   }
+  if (await extra.publicApi(req, res, p, method)) return;
   if (p === '/api/login' && method === 'POST') {
     const b = await readBody(req); if (!b) return json(res, 400, { error: 'bad_request' });
     const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
@@ -506,6 +592,7 @@ async function api(req, res, p, url) {
   if (!me) return json(res, 401, { error: 'unauthorized', message: '請先登入' });
   if (p === '/api/logout' && method === 'POST') { delete D().sessions[A.sha256(bearer(req))]; await store.save(); return json(res, 200, { ok: true }); }
   if (p === '/api/me') return json(res, 200, { user: publicUser(me), channels: channelsFor(me), org: publicOrgFor(me) });
+  if (await extra.userApi(req, res, p, method, me, url)) return;
   if (p === '/api/me/password' && method === 'POST') {
     const b = await readBody(req); const raw = userById(me.id);
     if (!b || !raw || !A.verifyPassword(b.oldPassword || '', raw.passHash)) return json(res, 400, { error: 'wrong_password', message: '舊密碼錯誤' });
@@ -585,6 +672,8 @@ async function api(req, res, p, url) {
   const seg = p.split('/').slice(3); // ['users', id?] ...
   const b = (method === 'POST' || method === 'PATCH' || method === 'PUT') ? await readBody(req) : {};
   if (b === null) return json(res, 400, { error: 'bad_request' });
+  const admExtra = await extra.adminExtra(req, res, seg, method, me, scopeOrg, b);
+  if (admExtra !== false) return admExtra;
 
   if (seg[0] === 'users') {
     if (!seg[1] && method === 'GET') return json(res, 200, { users: D().users.filter(u => u.orgId === scopeOrg.id).map(u => ({ ...publicUser(u), online: isOnline(u.id), channel: channelOf(u.id) })) });
@@ -686,7 +775,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { cors(res); res.writeHead(204); return res.end(); }
     if (p.startsWith('/api/')) return await api(req, res, p, url);
     if (p.startsWith('/audio/')) return json(res, 404, { error: 'not_found' }); // 不保存錄音
-    let rel = p === '/' ? 'index.html' : (p === '/admin' || p === '/admin/') ? 'admin.html' : (p === '/dispatch' || p === '/dispatch/') ? 'dispatch.html' : (p === '/platform' || p === '/platform/') ? 'platform.html' : p.slice(1);
+    let rel = p === '/' ? 'index.html'
+      : (p === '/admin' || p === '/admin/') ? 'admin.html'
+      : (p === '/dispatch' || p === '/dispatch/') ? 'dispatch.html'
+      : (p === '/platform' || p === '/platform/') ? 'platform.html'
+      : (p === '/privacy' || p === '/privacy/') ? 'privacy.html'
+      : (p === '/terms' || p === '/terms/') ? 'terms.html'
+      : (p === '/delete-account' || p === '/delete-account/') ? 'delete-account.html'
+      : (p === '/join' || p === '/join/') ? 'join.html'
+      : p.slice(1);
     let f = path.normalize(path.join(PUB, rel));
     if (!f.startsWith(PUB) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(PUB, 'index.html');
     res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin' });
@@ -724,8 +821,10 @@ wss.on('connection', (ws) => {
       let o = online.get(u.id); if (!o) { o = { sockets: new Set(), channel: null, listen: new Set(), orgId: orgIdOf(u) }; online.set(u.id, o); }
       o.orgId = orgIdOf(u);
       o.sockets.add(ws);
-      send(ws, { t: 'welcome', user: publicUser(u), org: publicOrgFor(u), channels: channelsFor(u), dms: dmSummaries(u.id), online: onlineList(u), alerts: alertsVisibleTo(u), roles: CH_ROLES, queue: isDispatcher(u) ? queueView(orgIdOf(u)) : [], dispatchers: isDispatcher(u) ? dispatchersOnline(u) : [], serverTime: now() });
-      if (o.channel) { send(ws, { t: 'joined', channel: o.channel }); broadcastPresence(o.channel); }
+      const want = (m.resume && m.resume.channel) || u.lastChannel;
+      if (!o.channel && want && canAccess(u, want) && roleIn(u, chById(want))) o.channel = want;
+      send(ws, { t: 'welcome', user: publicUser(u), org: publicOrgFor(u), channels: channelsFor(u), dms: dmSummaries(u.id), online: onlineList(u), alerts: alertsVisibleTo(u), roles: CH_ROLES, queue: isDispatcher(u) ? queueView(orgIdOf(u)) : [], dispatchers: isDispatcher(u) ? dispatchersOnline(u) : [], serverTime: now(), resumedChannel: o.channel || null });
+      if (o.channel) { send(ws, { t: 'joined', channel: o.channel, resumed: true }); broadcastPresence(o.channel); }
       broadcastOnline();
       for (const [conv, f] of floors) if (recipients(conv).includes(u.id) && f.userId !== u.id) send(ws, { t: 'talk_start', conv, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
       return;
@@ -746,6 +845,7 @@ wss.on('connection', (ws) => {
         const prev = o.channel; o.channel = ch.id;
         if (prev && prev !== ch.id) { for (const s of o.sockets) if (s.talking === prev) endFloor(prev, 'left'); broadcastPresence(prev); }
         for (const s of o.sockets) send(s, { t: 'joined', channel: ch.id, myRole: roleIn(me, ch) });
+        rememberChannel(me, ch.id);
         broadcastPresence(ch.id); pushChannelsAll(); broadcastOnline();
         const f = floors.get(ch.id);
         if (f && f.userId !== me.id) send(ws, { t: 'talk_start', conv: ch.id, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
@@ -788,6 +888,7 @@ wss.on('connection', (ws) => {
         floors.set(conv, f); ws.talking = conv;
         send(ws, { t: 'floor_granted', conv, streamId: f.streamId, prio, maxMs: MAX_TALK_MS });
         broadcastConv(conv, { t: 'talk_start', conv, streamId: f.streamId, from: me.id, fromName: me.displayName, prio, toName: isDm(conv) ? nameOf(dmParts(conv).find(x => x !== me.id)) : undefined }, me.id);
+        notifyTalkStart(conv, me, f.streamId).catch(e => console.error('[apns]', e.message));
         break;
       }
       case 'ptt_stop': { if (ws.talking) { const f = floors.get(ws.talking); if (f && f.ws === ws) endFloor(ws.talking, 'released'); ws.talking = null; } break; }
@@ -899,7 +1000,16 @@ wss.on('connection', (ws) => {
         sendUser(me.id, { t: 'chat', message: msg });
         break;
       }
-      case 'ping': send(ws, { t: 'pong', ts: m.ts }); break;
+      case 'ping': send(ws, { t: 'pong', ts: m.ts, serverTime: now() }); break;
+      case 'ptt_push_token': {
+        if (m.channelId === null || m.token === '') { removePttPush(me.id, m.channelId || null); store.save().catch(() => {}); send(ws, { t: 'ptt_push_ok', cleared: true }); break; }
+        const token = String(m.token || '').trim();
+        if (!token || token.length < 16) { send(ws, { t: 'error', code: 'bad_token', msg: '缺少有效的 PTT token' }); break; }
+        upsertPttPush({ userId: me.id, channelId: m.channelId ? String(m.channelId) : null, token, bundleId: String(m.bundleId || process.env.APNS_BUNDLE_ID || 'app.ptt.mobile').slice(0, 80), channelUUID: String(m.channelUUID || '').slice(0, 80), kind: 'voip-ptt', updatedAt: now() });
+        store.save().catch(() => {});
+        send(ws, { t: 'ptt_push_ok' });
+        break;
+      }
     }
   });
 
@@ -924,10 +1034,16 @@ setInterval(() => {
 (async () => {
   await store.init();
   await media.init();
+  await reports.init();
+  await callLog.init();
   ensureLobbies();
   await seedAdmin();
   await store.save();
-  const runClean = () => media.cleanup({ validUserIds: D().users.map(u => u.id) }).then(r => console.log('[media] cleanup', r)).catch(e => console.error('[media] cleanup', e.message));
+  const runClean = () => Promise.all([
+    media.cleanup({ validUserIds: D().users.map(u => u.id).concat(['deleted']) }),
+    reports.cleanup(),
+    callLog.cleanup()
+  ]).then(([m, r, c]) => console.log('[cleanup] media', m, 'reports', r, 'calls', c)).catch(e => console.error('[cleanup]', e.message));
   runClean();
   setInterval(runClean, 3600e3);
   setInterval(() => {

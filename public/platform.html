@@ -51,6 +51,16 @@
       <h2>公司一覽</h2>
       <div id="orgCards"></div>
     </section>
+    <section class="card">
+      <h2>全部問題回報</h2>
+      <p class="muted small">平台可查看所有公司的回報並標記已處理。亦可用 GET /api/platform/reports 與 /api/platform/reports/export 匯出（需平台管理員 token）。保留 90 天，不含語音。</p>
+      <div class="row" style="margin-bottom:8px">
+        <select id="rptFilter"><option value="">全部狀態</option><option value="open">未處理</option><option value="handled">已處理</option></select>
+        <button type="button" id="rptRefresh">重新整理</button>
+        <button type="button" id="rptExport">匯出 JSON</button>
+      </div>
+      <div id="rptList"></div>
+    </section>
   </div>
 </div>
 <div id="toast" class="toast hidden"></div>

@@ -16,9 +16,9 @@ async function http(method, p, body, token) {
   return { status: r.status, body: j };
 }
 const login = async (u, p, org = 'DEMO') => (await http('POST', '/api/login', { username: u, password: p, org })).body?.token;
-function client(token, label) {
+function client(token, label, extraHello = {}, wsUrl = WSURL) {
   return new Promise((res) => {
-    const ws = new WebSocket(WSURL); const c = { ws, label, msgs: [], bin: [], closed: null };
+    const ws = new WebSocket(wsUrl); const c = { ws, label, msgs: [], bin: [], closed: null };
     c.send = (o) => ws.send(JSON.stringify(o));
     c.wait = (pred, ms = 6000) => new Promise((r, j) => { const t0 = Date.now(); (function chk() { const m = c.msgs.find(pred); if (m) return r(m); if (Date.now() - t0 > ms) return j(new Error('timeout ' + label)); setTimeout(chk, 25); })(); });
     c.has = (pred) => c.msgs.some(pred);
@@ -26,7 +26,7 @@ function client(token, label) {
     ws.on('message', (d, isBin) => { if (isBin) c.bin.push(Buffer.from(d)); else c.msgs.push(JSON.parse(d.toString())); });
     ws.on('close', (code) => { c.closed = code; });
     ws.on('error', () => {});
-    ws.on('open', () => { c.send({ t: 'hello', token }); const t0 = Date.now(); (function chk() { if (c.msgs.some(m => m.t === 'welcome' || m.t === 'auth_failed') || c.closed) return res(c); if (Date.now() - t0 > 8000) return res(c); setTimeout(chk, 25); })(); });
+    ws.on('open', () => { c.send({ t: 'hello', token, ...extraHello }); const t0 = Date.now(); (function chk() { if (c.msgs.some(m => m.t === 'welcome' || m.t === 'auth_failed') || c.closed) return res(c); if (Date.now() - t0 > 8000) return res(c); setTimeout(chk, 25); })(); });
   });
 }
 function tone(ms, f = 440) { const n = 16000 * ms / 1000; const b = Buffer.alloc(n * 2); for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.sin(2 * Math.PI * f * i / 16000) * 8000), i * 2); return b; }
@@ -381,6 +381,116 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('預設公司不能刪除', (await http('DELETE', '/api/platform/orgs/odefault', null, adminTok)).status === 400);
     try { Cdemo.ws.close(); Coth.ws.close(); } catch {}
 
+    // ===== 問題回報 =====
+    const rep = await mk('rep', '回報員', 'Rep-pass-123');
+    const tokRep = await login(rep.username, rep.password);
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
+    const leakLog = [
+      '2026-01-01T00:00:00.000Z [ws] connecting',
+      '2026-01-01T00:00:01.000Z [ws] hello token=SUPER_SECRET_TOKEN_VALUE_XXXX',
+      '{"password":"hunter2-should-hide","token":"another-secret-token-value"}',
+      'ok line'
+    ];
+    const rpt = await http('POST', '/api/reports', {
+      text: '測試回報：連線曾中斷',
+      screenshot: png.toString('base64'),
+      meta: { platform: 'web', device: 'e2e', os: 'Linux', appVersion: 'e2e', browser: 'node', userAgent: 'e2e', token: 'should-not-appear' },
+      log: leakLog
+    }, tokRep);
+    ok('使用者可送出回報（含截圖與日誌）', rpt.status === 201 && rpt.body.report && rpt.body.report.id && rpt.body.report.hasScreenshot, JSON.stringify(rpt.body && rpt.body.report));
+    const rid = rpt.body && rpt.body.report && rpt.body.report.id;
+    const rptEmpty = await http('POST', '/api/reports', { text: '   ' }, tokRep);
+    ok('空白回報被拒絕', rptEmpty.status === 400);
+    const tooShot = await http('POST', '/api/reports', { text: '大圖', screenshot: Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(301 * 1024, 1)]).toString('base64') }, tokRep);
+    ok('超過約 300KB 的截圖被拒絕', tooShot.status === 413 || tooShot.status === 400, 'status=' + tooShot.status);
+    const admList = await http('GET', '/api/admin/reports', null, adminTok);
+    const found = (admList.body.reports || []).find(r => r.id === rid);
+    ok('公司後台看得到自己公司的回報', admList.status === 200 && !!found);
+    ok('回報日誌已過濾 token／密碼', !!(found && found.log && found.log.every(l => !/SUPER_SECRET_TOKEN_VALUE_XXXX|hunter2-should-hide|another-secret-token-value/.test(l))) && JSON.stringify(found && found.meta || {}).indexOf('should-not-appear') < 0, JSON.stringify(found && found.log));
+    const shotAdm = await fetch(BASE + '/api/admin/reports/' + rid + '/screenshot', { headers: { Authorization: 'Bearer ' + adminTok } });
+    ok('公司後台可下載截圖', shotAdm.status === 200 && (shotAdm.headers.get('content-type') || '').includes('png'));
+    const shotNo = await fetch(BASE + '/api/admin/reports/' + rid + '/screenshot');
+    ok('未登入不能下載回報截圖', shotNo.status === 401);
+    const marked = await http('PATCH', '/api/platform/reports/' + rid, { status: 'handled', note: '已查看' }, adminTok);
+    ok('平台後台可標記已處理', marked.status === 200 && marked.body.report.status === 'handled' && marked.body.report.note === '已查看');
+    const platList = await http('GET', '/api/platform/reports?status=handled', null, adminTok);
+    ok('平台後台可看全部回報', platList.status === 200 && (platList.body.reports || []).some(r => r.id === rid));
+    const exported = await http('GET', '/api/platform/reports/export', null, adminTok);
+    ok('平台管理員專用匯出 API 可拉回報', exported.status === 200 && Array.isArray(exported.body.reports) && exported.body.reports.some(r => r.id === rid));
+    const userList = await http('GET', '/api/admin/reports', null, tokRep);
+    ok('一般使用者不能列出公司回報', userList.status === 403);
+    let rateHits = 0, lastRate = null;
+    for (let i = 0; i < 6; i++) {
+      lastRate = await http('POST', '/api/reports', { text: '頻率測試 ' + i }, tokRep);
+      if (lastRate.status === 201) rateHits++;
+    }
+    ok('回報有頻率限制（同一使用者每小時最多 5 則）', lastRate.status === 429 && rateHits <= 5, 'hits=' + rateHits + ' last=' + lastRate.status);
+
+    // ===== 斷線重連與弱網路 =====
+    const chR2 = await http('POST', '/api/admin/channels', { name: `重連頻道-${sfx}`, open: false }, adminTok);
+    const CH2 = chR2.body.channel.id; created.channels.push(CH2);
+    const ra = await mk('ra', '重連甲', 'Ra-pass-123'), rb = await mk('rb', '重連乙', 'Rb-pass-123');
+    for (const u of [ra, rb]) await http('PUT', `/api/admin/channels/${CH2}/members/${u.id}`, { role: 'member' }, adminTok);
+    const tokA = await login(ra.username, ra.password), tokB = await login(rb.username, rb.password);
+    let CA = await client(tokA, '重連甲'), CB = await client(tokB, '重連乙');
+    CA.send({ t: 'join', channel: CH2 }); CB.send({ t: 'join', channel: CH2 });
+    await CA.wait(m => m.t === 'joined' && m.channel === CH2);
+    await CB.wait(m => m.t === 'joined' && m.channel === CH2);
+
+    const pingTs = Date.now();
+    CB.clear();
+    CB.send({ t: 'ping', ts: pingTs });
+    const pong = await CB.wait(m => m.t === 'pong');
+    ok('ping 會回 pong 並帶回原時間戳（可供 RTT）', pong.ts === pingTs && typeof pong.serverTime === 'number');
+
+    CB.clear();
+    const gDrop = await talk(CA, CH2);
+    await CB.wait(m => m.t === 'talk_start' && m.from === ra.id);
+    CA.ws.send(tone(200));
+    CA.ws.close();
+    const teDrop = await CB.wait(m => m.t === 'talk_end' && m.from === ra.id);
+    ok('講話中斷線時伺服器安全釋放發言權', gDrop.t === 'floor_granted' && teDrop.reason === 'disconnect', teDrop && teDrop.reason);
+    const afterDrop = await talk(CB, CH2);
+    ok('發言權釋放後其他人可立刻取得', afterDrop.t === 'floor_granted');
+    CB.send({ t: 'ptt_stop' });
+    await CB.wait(m => m.t === 'talk_end' && m.from === rb.id).catch(() => null);
+    CA = await client(tokA, '重連甲-resume', { resume: { channel: CH2 } });
+    const welR = CA.msgs.find(m => m.t === 'welcome');
+    ok('以 token 重連可快速恢復 session 並回到原頻道', !!(welR && welR.resumedChannel === CH2) && CA.has(m => m.t === 'joined' && m.channel === CH2 && m.resumed), JSON.stringify(welR && { resumedChannel: welR.resumedChannel }));
+
+    let weakOk = false, weakExtra = '略過（無法啟動本機代理）';
+    try {
+      const { startWsProxy } = require('./net-proxy');
+      const proxy = await startWsProxy({ target: WSURL, delayMs: 50, dropBin: 0.2 });
+      const P1 = await client(tokA, 'ra-proxy', { resume: { channel: CH2 } }, proxy.url);
+      const P2 = await client(tokB, 'rb-proxy', { resume: { channel: CH2 } }, proxy.url);
+      const joined1 = P1.has(m => m.t === 'welcome');
+      const joined2 = P2.has(m => m.t === 'welcome');
+      P1.send({ t: 'join', channel: CH2 }); P2.send({ t: 'join', channel: CH2 });
+      await P1.wait(m => m.t === 'joined' && m.channel === CH2);
+      await P2.wait(m => m.t === 'joined' && m.channel === CH2);
+      const gP = await talk(P1, CH2);
+      P1.ws.send(tone(400));
+      await sleep(700);
+      P1.send({ t: 'ptt_stop' });
+      await sleep(200);
+      const gotSome = P2.bin.length > 0;
+      weakOk = joined1 && joined2 && gP.t === 'floor_granted' && gotSome;
+      weakExtra = `delay=50ms drop=20% frames=${P2.bin.length} dropped=${proxy.stats.dropped} granted=${gP.t}`;
+      try { P1.ws.close(); P2.ws.close(); } catch {}
+      await proxy.close();
+    } catch (e) { weakExtra = String(e.message || e); }
+    ok('弱網路代理（延遲＋丟包）下仍可重連、恢復頻道並收到部分語音', weakOk, weakExtra);
+    try { CA.ws.close(); CB.ws.close(); } catch {}
+
+    // 清掉本次測試回報，避免留下資料
+    const leftover = await http('GET', '/api/platform/reports', null, adminTok);
+    for (const r of (leftover.body && leftover.body.reports) || []) {
+      if (r.userId === rep.id || (r.text || '').includes('測試回報') || (r.text || '').includes('頻率測試') || (r.text || '').includes('hello debug')) {
+        await http('DELETE', '/api/platform/reports/' + r.id, null, adminTok);
+      }
+    }
+
     // ===== 不保存錄音 =====
     const hist = await http('GET', '/api/history?conv=lobby', null, adminTok), wav = await fetch(BASE + '/audio/0123456789abcdef.wav');
     const h2 = await http('GET', '/api/health');
@@ -388,7 +498,11 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     if (DATA_DIR) {
       const files = walk(DATA_DIR).map(f => path.relative(DATA_DIR, f));
       const txt = fs.existsSync(path.join(DATA_DIR, 'db.json')) ? fs.readFileSync(path.join(DATA_DIR, 'db.json'), 'utf8') : '';
-      localOk = files.every(f => f === 'db.json' || f === 'chat.json' || f.startsWith('photos' + require('path').sep) || f === 'photos') && !/RIFF|WAVE/.test(txt);
+      const sep = require('path').sep;
+      const allow = f => f === 'db.json' || f === 'chat.json' || f === 'reports.json' || f === 'call-logs.json'
+        || f === 'photos' || f.startsWith('photos' + sep)
+        || f === 'report-shots' || f.startsWith('report-shots' + sep);
+      localOk = files.every(allow) && !/RIFF|WAVE/.test(txt);
       local = `data/ 檔案 [${files.join(', ')}]，且 db.json 沒有音訊`;
     }
     ok('講完後伺服器沒有留下音訊檔／歷史（也不存位置與警報）', hist.status === 404 && wav.status === 404 && h2.body.storesAudio === false && localOk, `history→${hist.status}、audio→${wav.status}；${local}`);

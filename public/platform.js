@@ -26,6 +26,7 @@ async function refresh() {
   const d = await api('GET', '/api/platform/orgs');
   orgs = d.orgs; plans = d.plans;
   renderPlans(); renderOrgs();
+  loadReports();
 }
 function renderPlans() {
   $('#planBox').innerHTML = Object.values(plans).map(p => `<div class="ch-card"><strong>${esc(p.label)}</strong>（${esc(p.id)}）
@@ -88,3 +89,49 @@ $('#orgCards').addEventListener('click', async (e) => {
 });
 if ($('#org') && ! $('#org').value) $('#org').value = 'PLATFORM';
 boot();
+
+function fmtTs(ts) { return ts ? new Date(ts).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' }) : ''; }
+async function shotUrl(path) {
+  const r = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) return '';
+  return URL.createObjectURL(await r.blob());
+}
+async function loadReports() {
+  if (!$('#rptList')) return;
+  const st = ($('#rptFilter') && $('#rptFilter').value) || '';
+  const q = st ? ('?status=' + encodeURIComponent(st)) : '';
+  try {
+    const j = await api('GET', '/api/platform/reports' + q);
+    $('#rptList').innerHTML = (j.reports || []).map(r => {
+      const meta = r.meta || {};
+      const log = (r.log || []).join('\n');
+      return `<div class="rpt-item" data-id="${esc(r.id)}">
+        <div><b>${esc(r.displayName || r.username || '')}</b> · ${esc(r.username || '')} · 公司 ${esc(r.orgCode || r.orgId || '')} · ${esc(fmtTs(r.ts))}
+          <span class="tag ${r.status === 'handled' ? 'on' : ''}">${r.status === 'handled' ? '已處理' : '未處理'}</span>
+          ${r.hasScreenshot ? '<span class="tag">有截圖</span>' : ''}</div>
+        <p>${esc(r.text)}</p>
+        <p class="muted small">${esc([meta.platform, meta.device, meta.os, meta.appVersion, meta.browser].filter(Boolean).join(' · '))}</p>
+        ${r.note ? `<p class="muted small">備註：${esc(r.note)}</p>` : ''}
+        ${log ? `<details><summary>連線事件日誌</summary><pre>${esc(log)}</pre></details>` : ''}
+        ${r.hasScreenshot ? `<img alt="截圖" data-shot="${esc('/api/platform/reports/' + r.id + '/screenshot')}">` : ''}
+        <div class="ch-add" style="margin-top:8px">
+          ${r.status === 'handled' ? `<button data-rpt="open">標為未處理</button>` : `<button data-rpt="handled">標記已處理</button>`}
+        </div>
+      </div>`;
+    }).join('') || '<p class="muted">目前沒有回報</p>';
+    $('#rptList').querySelectorAll('img[data-shot]').forEach(img => { shotUrl(img.dataset.shot).then(src => { if (src) img.src = src; }); });
+  } catch {}
+}
+if ($('#rptRefresh')) $('#rptRefresh').addEventListener('click', loadReports);
+if ($('#rptFilter')) $('#rptFilter').addEventListener('change', loadReports);
+if ($('#rptExport')) $('#rptExport').addEventListener('click', async () => {
+  const j = await api('GET', '/api/platform/reports/export');
+  const blob = new Blob([JSON.stringify(j, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'geelo-reports.json'; a.click();
+});
+if ($('#rptList')) $('#rptList').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-rpt]'); if (!b) return;
+  const id = b.closest('.rpt-item').dataset.id;
+  await api('PATCH', '/api/platform/reports/' + id, { status: b.dataset.rpt });
+  toast('已更新回報狀態'); loadReports();
+});
