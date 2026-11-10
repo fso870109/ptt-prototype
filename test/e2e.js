@@ -598,6 +598,24 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
       await http('PATCH', '/api/admin/settings', { saveCaptions: false }, adminTok);
       for (const id of created.channels) await http('DELETE', `/api/admin/channels/${id}`, null, adminTok);
       for (const id of created.users) await http('DELETE', `/api/admin/users/${id}`, null, adminTok);
+      const lobbyLeft = await http('GET', '/api/messages?conv=lobby', null, adminTok);
+      for (const m of (lobbyLeft.body && lobbyLeft.body.messages) || []) {
+        if ((m.text || '') === '刪除前留下的話') await http('DELETE', '/api/admin/messages/' + m.id, null, adminTok);
+      }
+      const leftoverInv = await http('GET', '/api/admin/invites', null, adminTok);
+      const chNow = await http('GET', '/api/admin/channels', null, adminTok);
+      const liveCh = new Set(((chNow.body && chNow.body.channels) || []).map(c => c.id));
+      for (const i of (leftoverInv.body && leftoverInv.body.invites) || []) {
+        if (!liveCh.has(i.channelId)) await http('DELETE', '/api/admin/invites/' + i.id, null, adminTok);
+      }
+      const testIds = new Set(created.users);
+      const leftoverCalls = await http('GET', '/api/admin/calls?limit=1000', null, adminTok);
+      for (const c of (leftoverCalls.body && leftoverCalls.body.calls) || []) {
+        const testName = (c.channelName || '').includes('測試頻道-') || (c.channelName || '').includes('重連頻道-');
+        if (testIds.has(c.from) || testIds.has(c.peerId) || testName) {
+          await http('DELETE', '/api/admin/calls/' + c.id, null, adminTok);
+        }
+      }
       for (const id of created.orgs) await http('DELETE', `/api/platform/orgs/${id}`, null, adminTok);
       const us = await http('GET', '/api/admin/users', null, adminTok), cs = await http('GET', '/api/admin/channels', null, adminTok);
       const og = await http('GET', '/api/platform/orgs', null, adminTok);

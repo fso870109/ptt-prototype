@@ -715,6 +715,8 @@ async function api(req, res, p, url) {
       for (const c of D().channels) delete c.members[u.id];
       locations.delete(u.id);
       media.convsForUser(u.id).then(cs => media.deleteConvs(cs)).then(() => media.deleteByFrom(u.id)).catch(e => console.error('[media]', e.message));
+      await callLog.anonymizeUser(u.id).catch(e => console.error('[calllog]', e.message));
+      await reports.anonymizeUser(u.id).catch(e => console.error('[reports]', e.message));
       await store.save(); kick(u.id); online.delete(u.id); broadcastOnline();
       return json(res, 200, { ok: true });
     }
@@ -739,6 +741,7 @@ async function api(req, res, p, url) {
       if (Orgs.isLobbyChannel(c)) return json(res, 400, { error: 'protected', message: '大廳不能刪除' });
       endFloor(c.id, 'deleted');
       D().channels = D().channels.filter(x => x.id !== c.id); lastTalk.delete(c.id);
+      D().invites = (D().invites || []).filter(i => i.channelId !== c.id);
       await media.deleteConvs([c.id]).catch(e => console.error('[media]', e.message));
       await store.save();
       for (const id of online.keys()) enforceAccess(id);
