@@ -58,6 +58,13 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     const meA = await http('GET', '/api/me', null, adminTok);
     ok('管理員身分為 admin', meA.body?.user?.role === 'admin');
     ok('管理員以 DEMO 登入會帶公司資料', meA.body?.org?.code === 'DEMO');
+    // 測試會建立十幾個帳號；DEMO 已有真人帳號時可能碰到座位上限，先暫時放寬，結束時還原
+    const orgList = await http('GET', '/api/platform/orgs', null, adminTok);
+    const demoOrg = (orgList.body.orgs || []).find(o => o.code === 'DEMO');
+    if (demoOrg && (demoOrg.seatLimit || 0) < 50) {
+      demoSeatRestore = { id: demoOrg.id, seatLimit: demoOrg.seatLimit };
+      await http('PATCH', '/api/platform/orgs/' + demoOrg.id, { seatLimit: 50 }, adminTok);
+    }
 
     // ===== 後台：建立使用者與頻道、指派角色 =====
     const mk = async (key, name, password, role) => {
@@ -596,12 +603,6 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     ok('服務條款頁可開啟', terms.includes('服務條款') && terms.includes('【待填】') && terms.includes('不保存錄音'));
     ok('刪除帳號說明頁提供 Play 要求的網頁入口', delPage.includes('刪除我的帳號') && delPage.includes('最後一位管理員') && delPage.includes('id="delForm"'));
 
-    const orgList = await http('GET', '/api/platform/orgs', null, adminTok);
-    const demoOrg = (orgList.body.orgs || []).find(o => o.code === 'DEMO');
-    if (demoOrg && (demoOrg.seatLimit || 0) < 50) {
-      demoSeatRestore = { id: demoOrg.id, seatLimit: demoOrg.seatLimit };
-      await http('PATCH', '/api/platform/orgs/' + demoOrg.id, { seatLimit: 50 }, adminTok);
-    }
 
     const vic = await mk('vic', '將刪除', 'Vic-pass-123');
     const tokVic = await login(vic.username, vic.password);
