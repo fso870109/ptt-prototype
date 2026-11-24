@@ -21,7 +21,11 @@ const createExtra = require('./lib/http-extra');
 const PORT = +process.env.PORT || 8800;
 const PUB = path.join(__dirname, 'public');
 const SAMPLE_RATE = 16000;
-const MAX_TALK_MS = 60000;
+// 單次發話上限（按住、鎖定講話、聲控都適用）；到上限由伺服器收回發言權
+const MAX_TALK_MS = Math.max(5000, Math.min(300000, +process.env.MAX_TALK_MS || 60000));
+// 到上限被收回後，同一人在同一對話需等待這段時間才能再拿發言權，讓其他人有機會說話
+const TALK_COOLDOWN_MS = Math.max(0, Math.min(30000, process.env.TALK_COOLDOWN_MS !== undefined ? +process.env.TALK_COOLDOWN_MS : 3000));
+const TALK_MODES = ['hold', 'lock', 'vox'];
 const STALL_MS = 3000;
 const SESSION_DAYS = 30;
 
@@ -150,6 +154,7 @@ const online = new Map();
 const floors = new Map();
 /** conv -> { from, fromName, toName, ts, durMs }：純文字的最近說話者 */
 const lastTalk = new Map();
+const talkCooldown = new Map(); // userId|conv -> until（達上限後的冷卻）
 const lastSpeaker = new Map(); // conv -> { userId, until } 供字幕在鬆開後短暫送出最終結果
 /** userId -> { lat, lng, acc, battery, charging, ts }：只留最新一筆，不做軌跡 */
 const locations = new Map();
@@ -283,7 +288,7 @@ function endFloor(conv, reason, extra = {}) {
       ts: now()
     }).catch(e => console.error('[calllog]', e.message));
   }
-  broadcastConv(conv, { t: 'talk_end', conv, streamId: f.streamId, from: f.userId, reason, lastTalk: info, ...extra });
+  broadcastConv(conv, { t: 'talk_end', conv, streamId: f.streamId, from: f.userId, reason, mode: f.mode, lastTalk: info, ...extra });
   if (info && !isDm(conv)) for (const id of online.keys()) { const u = userById(id); if (u && roleIn(u, chById(conv))) sendUser(id, { t: 'channel_activity', channel: conv, last: info.ts, lastTalk: info }); }
 }
 
@@ -552,7 +557,7 @@ async function api(req, res, p, url) {
   const method = req.method;
   if (p === '/api/health') {
     const ms = await media.stats();
-    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, orgs: D().orgs.length, activeTalks: floors.size, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, serverStt: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES, reportsRetentionDays: 90, callLogRetentionDays: 90, apns: Apns.enabled() });
+    return json(res, 200, { ok: true, storage: store.kind, online: onlineList().length, channels: D().channels.length, users: D().users.length, orgs: D().orgs.length, activeTalks: floors.size, maxTalkMs: MAX_TALK_MS, talkCooldownMs: TALK_COOLDOWN_MS, talkModes: TALK_MODES, activeAlerts: alerts.size, dispatchQueue: dispatchQueue.size, storesAudio: false, serverStt: false, messages: ms.messages, photos: ms.photos, photoBytes: ms.photoBytes, photoRetentionDays: PHOTO_RETENTION_MS / 864e5, photoQuotaBytes: PHOTO_QUOTA_BYTES, reportsRetentionDays: 90, callLogRetentionDays: 90, apns: Apns.enabled() });
   }
   if (await extra.publicApi(req, res, p, method)) return;
   if (p === '/api/login' && method === 'POST') {
@@ -829,7 +834,7 @@ wss.on('connection', (ws) => {
       send(ws, { t: 'welcome', user: publicUser(u), org: publicOrgFor(u), channels: channelsFor(u), dms: dmSummaries(u.id), online: onlineList(u), alerts: alertsVisibleTo(u), roles: CH_ROLES, queue: isDispatcher(u) ? queueView(orgIdOf(u)) : [], dispatchers: isDispatcher(u) ? dispatchersOnline(u) : [], serverTime: now(), resumedChannel: o.channel || null });
       if (o.channel) { send(ws, { t: 'joined', channel: o.channel, resumed: true }); broadcastPresence(o.channel); }
       broadcastOnline();
-      for (const [conv, f] of floors) if (recipients(conv).includes(u.id) && f.userId !== u.id) send(ws, { t: 'talk_start', conv, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
+      for (const [conv, f] of floors) if (recipients(conv).includes(u.id) && f.userId !== u.id) send(ws, { t: 'talk_start', conv, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio, mode: f.mode });
       return;
     }
     if (!me) return send(ws, { t: 'auth_failed', reason: 'not_logged_in' });
@@ -851,7 +856,7 @@ wss.on('connection', (ws) => {
         rememberChannel(me, ch.id);
         broadcastPresence(ch.id); pushChannelsAll(); broadcastOnline();
         const f = floors.get(ch.id);
-        if (f && f.userId !== me.id) send(ws, { t: 'talk_start', conv: ch.id, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
+        if (f && f.userId !== me.id) send(ws, { t: 'talk_start', conv: ch.id, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio, mode: f.mode });
         for (const a of alerts.values()) if (a.channel === ch.id && !a.notified.has(me.id)) { a.notified.add(me.id); send(ws, { t: 'alert', alert: alertView(a) }); }
         // 位置可見範圍隨頻道改變
         pushAllLocs(me.id); if (locations.has(me.id)) pushLocTo(me.id);
@@ -876,21 +881,26 @@ wss.on('connection', (ws) => {
           if (!ch || !r || (o.channel !== conv && !listening)) return send(ws, { t: 'floor_denied', conv, reason: 'no_access' });
           if (!CH_ROLES[r].talk && !activeAlertOf(me.id)) return send(ws, { t: 'floor_denied', conv, reason: 'listen_only' });
         }
+        const mode = TALK_MODES.includes(m.mode) ? m.mode : 'hold';
+        { const cdKey = me.id + '|' + conv; const cd = talkCooldown.get(cdKey);
+          if (cd && cd > now()) return send(ws, { t: 'floor_denied', conv, reason: 'cooldown', retryMs: cd - now(), mode });
+          if (cd) talkCooldown.delete(cdKey); }
         if (ws.talking && ws.talking !== conv) endFloor(ws.talking, 'switch');
         const prio = prioFor(me, conv);
         const cur = floors.get(conv);
         if (cur && cur.userId !== me.id) {
-          if (prio > cur.prio) {
+          // 聲控不搶話：避免把喇叭播出的別人聲音誤判成自己說話而中斷對方；要插話請按住講話
+          if (prio > cur.prio && mode !== 'vox') {
             // 優先搶話：中斷較低優先權者
             send(cur.ws, { t: 'floor_revoked', conv, reason: 'preempted', byName: me.displayName, by: me.id });
             endFloor(conv, 'preempted', { by: me.id, byName: me.displayName });
-          } else return send(ws, { t: 'floor_denied', conv, reason: 'busy', by: cur.userId, byName: nameOf(cur.userId) });
+          } else return send(ws, { t: 'floor_denied', conv, reason: 'busy', by: cur.userId, byName: nameOf(cur.userId), mode });
         } else if (cur) endFloor(conv, 'restart');
-        const f = { userId: me.id, ws, streamId: streamSeq++, prio, bytes: 0, startedAt: now(), lastAudio: now() };
-        f.timer = setTimeout(() => { if (floors.get(conv) === f) { endFloor(conv, 'timeout'); send(ws, { t: 'floor_revoked', conv, reason: 'timeout' }); } }, MAX_TALK_MS);
+        const f = { userId: me.id, ws, streamId: streamSeq++, prio, mode, bytes: 0, startedAt: now(), lastAudio: now() };
+        f.timer = setTimeout(() => { if (floors.get(conv) === f) { if (TALK_COOLDOWN_MS) talkCooldown.set(me.id + '|' + conv, now() + TALK_COOLDOWN_MS); endFloor(conv, 'timeout'); send(ws, { t: 'floor_revoked', conv, reason: 'timeout', maxMs: MAX_TALK_MS, cooldownMs: TALK_COOLDOWN_MS }); } }, MAX_TALK_MS);
         floors.set(conv, f); ws.talking = conv;
-        send(ws, { t: 'floor_granted', conv, streamId: f.streamId, prio, maxMs: MAX_TALK_MS });
-        broadcastConv(conv, { t: 'talk_start', conv, streamId: f.streamId, from: me.id, fromName: me.displayName, prio, toName: isDm(conv) ? nameOf(dmParts(conv).find(x => x !== me.id)) : undefined }, me.id);
+        send(ws, { t: 'floor_granted', conv, streamId: f.streamId, prio, mode, maxMs: MAX_TALK_MS });
+        broadcastConv(conv, { t: 'talk_start', conv, streamId: f.streamId, from: me.id, fromName: me.displayName, prio, mode, toName: isDm(conv) ? nameOf(dmParts(conv).find(x => x !== me.id)) : undefined }, me.id);
         notifyTalkStart(conv, me, f.streamId).catch(e => console.error('[apns]', e.message));
         break;
       }
@@ -921,7 +931,7 @@ wss.on('connection', (ws) => {
         send(ws, { t: 'listening', channels: [...o.listen] });
         for (const ch of o.listen) {
           const f = floors.get(ch);
-          if (f && f.userId !== me.id) send(ws, { t: 'talk_start', conv: ch, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio });
+          if (f && f.userId !== me.id) send(ws, { t: 'talk_start', conv: ch, streamId: f.streamId, from: f.userId, fromName: nameOf(f.userId), prio: f.prio, mode: f.mode });
         }
         break;
       }
@@ -1032,6 +1042,7 @@ wss.on('connection', (ws) => {
 setInterval(() => { for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; ws.ping(); } }, 10000);
 setInterval(() => {
   for (const [conv, f] of floors) if (now() - f.lastAudio > (f.bytes ? STALL_MS : 10000)) { endFloor(conv, 'stalled'); send(f.ws, { t: 'floor_revoked', conv, reason: 'stalled' }); }
+  if (talkCooldown.size) for (const [k, until] of talkCooldown) if (until < now()) talkCooldown.delete(k);
 }, 500);
 
 (async () => {

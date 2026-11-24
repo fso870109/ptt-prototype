@@ -74,6 +74,23 @@
   <div class="panel hidden" id="tab-settings">
     <p class="muted small">連線狀態會顯示在上方；訊號品質依往返延遲（RTT）估算。</p>
     <p id="settingsConn" class="muted small">尚未連線</p>
+    <section id="talkModeSection">
+      <h3 class="settings-h">講話方式</h3>
+      <div id="talkModeGrid" class="mode-grid">
+        <button type="button" data-mode="hold" class="mode-btn"><b>✋ 按住講話</b><span>按住說話，放開就結束</span></button>
+        <button type="button" data-mode="lock" class="mode-btn"><b>🔒 鎖定講話</b><span>點一下開始一直講，再點一下結束；按住不放仍是按住講話</span></button>
+        <button type="button" data-mode="vox" class="mode-btn"><b>🗣️ 聲控</b><span>點一下開啟，偵測到說話聲就自動發送，安靜約 1 秒自動結束</span></button>
+      </div>
+      <div id="voxBox" class="vox-box hidden">
+        <label for="voxSens" class="vox-label">聲控靈敏度：<b id="voxSensVal">50</b>（越大越容易觸發）</label>
+        <input type="range" id="voxSens" min="0" max="100" step="1">
+        <div class="vox-meter" aria-label="麥克風音量"><div id="voxLevel"></div><div id="voxThr" class="vox-thr"></div></div>
+        <p class="muted small">綠色是目前音量，白線是門檻；音量超過白線（變橘色）就會發送。環境吵就把靈敏度調低。</p>
+        <button id="voxTest" type="button" class="settings-btn">測試麥克風音量</button>
+        <p class="muted small">聲控開啟時麥克風會一直在本機聽，比較耗電；聲音只在超過門檻時即時傳出，不會錄音保存。別人正在說話時聲控不會觸發，也不會插話；要插話請按住按鈕。網頁切到背景或換頻道時會自動關閉聲控。</p>
+      </div>
+      <p class="muted small">不論哪種方式，單次發話最長 60 秒，到時會自動結束並暫停 3 秒，讓其他人有機會說話。</p>
+    </section>
     <button id="openReport" type="button" class="primary settings-btn">回報問題</button>
     <p class="muted small">回報會附上裝置與約 200 行連線事件（已過濾 token、密碼與音訊內容），保留 90 天。公司管理員可在後台查看。</p>
     <h3 class="settings-h">外觀</h3>
@@ -139,7 +156,8 @@
       <span class="ptt-icon">🎙️</span>
       <span id="pttText">按住講話</span>
     </button>
-    <div id="meter" class="meter"><div id="meterBar"></div></div>
+    <div id="meter" class="meter"><div id="meterBar"></div><div id="meterThr" class="meter-thr hidden"></div></div>
+    <button id="modeChip" class="mode-chip" type="button">講話方式：按住講話 ⚙</button>
     <button id="sos" class="sos" type="button"><span class="sos-fill"></span><span class="sos-text">🚨 長按 2 秒發出緊急警報</span></button>
     <button id="callDispatch" class="call-dispatch" type="button">呼叫調度台</button>
     <p id="dispatchStatus" class="muted small hidden"></p>

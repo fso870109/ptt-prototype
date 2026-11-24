@@ -294,7 +294,11 @@ wss://<host>/ws
 沒有權限：`reason: "no_access"`。  
 頻道已被同等或更高優先權佔用：`reason: "busy"`，附 `by`、`byName`。
 
-單次發話上限 **60 秒**。
+選填 `mode`：`"hold"`（按住講話，預設）、`"lock"`（鎖定講話：點一下開始、再點一下結束）、`"vox"`（聲控）。三種方式都用同一套發言權，所以優先插話、通話紀錄、字幕都照常運作；`mode` 會帶回 `floor_granted`、`talk_start`、`talk_end`。
+- `vox` **不會插話**：即使優先權較高，有人在說話時也回 `busy`（避免把喇叭播出的聲音誤判成自己說話）。要插話請用 `hold`／`lock`。
+- 聲控的「安靜約 0.9 秒後放開」由客戶端判斷，到時送 `ptt_stop`。
+
+單次發話上限預設 **60 秒**（環境變數 `MAX_TALK_MS`，5～300 秒），不論哪種方式都由伺服器強制：到時送 `floor_revoked` `reason: "timeout"`（附 `maxMs`、`cooldownMs`）。之後同一人在同一對話要等 `TALK_COOLDOWN_MS`（預設 3 秒）才能再拿發言權，期間 `floor_denied` `reason: "cooldown"`（附 `retryMs`），其他人可以馬上說話。`/api/health` 會回報 `maxTalkMs`、`talkCooldownMs`、`talkModes`。
 
 #### `ptt_stop` — 放開按鈕、結束發話
 ```json
@@ -448,7 +452,7 @@ wss://<host>/ws
 ```json
 { "t": "floor_denied", "conv": "lobby", "reason": "busy", "by": "u…", "byName": "小華" }
 ```
-`reason`：`busy` | `no_access` | `listen_only` | `offline`
+`reason`：`busy` | `no_access` | `listen_only` | `offline` | `cooldown`（剛到發話上限，附 `retryMs`）
 
 #### `floor_revoked` — 你的發話被伺服器結束
 ```json
@@ -459,7 +463,7 @@ wss://<host>/ws
 | 值 | 說明 |
 |---|---|
 | `preempted` | 被更高優先權中斷 |
-| `timeout` | 已達 60 秒 |
+| `timeout` | 已達單次發話上限（預設 60 秒，附 `maxMs`、`cooldownMs`） |
 | `stalled` | 超過約 3 秒沒收到音訊封包（剛按下尚未有音訊時寬限 10 秒） |
 
 #### `talk_start` — 別人開始在你聽得到的對話裡講話

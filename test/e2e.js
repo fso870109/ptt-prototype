@@ -123,6 +123,102 @@ function walk(d) { let out = []; if (!fs.existsSync(d)) return out; for (const f
     C[sup.id].ws.send(tone(200)); await sleep(150); C[sup.id].send({ t: 'ptt_stop' });
     await C[m2.id].wait(m => m.t === 'talk_end' && m.from === sup.id && m.reason === 'released');
 
+    // ===== 持續說話：鎖定講話 / 聲控（同一套 floor 協定）=====
+    const hT = await http('GET', '/api/health');
+    const MAXMS = hT.body.maxTalkMs, CDMS = hT.body.talkCooldownMs;
+    ok('健康檢查回報發話上限、冷卻與講話方式', MAXMS >= 5000 && typeof CDMS === 'number' && JSON.stringify(hT.body.talkModes) === '["hold","lock","vox"]', `max=${MAXMS} cd=${CDMS}`);
+    for (const c of Object.values(C)) c.clear();
+    const silence = Buffer.alloc(3200);
+    const gHold = await talk(C[m1.id], CH);
+    ok('沒帶 mode 時視為按住講話（向下相容）', gHold.t === 'floor_granted' && gHold.mode === 'hold');
+    C[m1.id].send({ t: 'ptt_stop' }); await C[m2.id].wait(m => m.t === 'talk_end' && m.from === m1.id && m.reason === 'released');
+    for (const c of Object.values(C)) c.clear();
+    // 鎖定講話：持續送 2.5 秒（含靜音）不會被收回，再點一下結束
+    const gLock = await talk(C[m1.id], CH, 0, { mode: 'lock' });
+    const tsLock = await C[m2.id].wait(m => m.t === 'talk_start' && m.from === m1.id);
+    ok('鎖定講話取得發言權，帶 mode=lock 與上限', gLock.t === 'floor_granted' && gLock.mode === 'lock' && gLock.maxMs === MAXMS && tsLock.mode === 'lock');
+    for (let i = 0; i < 25; i++) { C[m1.id].ws.send(i % 2 ? silence : tone(100)); await sleep(100); }
+    ok('鎖定講話持續 2.5 秒沒有被中斷', !C[m1.id].has(m => m.t === 'floor_revoked') && !C[m2.id].has(m => m.t === 'talk_end'));
+    const busyLock = await talk(C[m2.id], CH, 0, { mode: 'lock' });
+    ok('鎖定講話中，同優先權的人被擋（busy）', busyLock.t === 'floor_denied' && busyLock.reason === 'busy');
+    C[m1.id].send({ t: 'ptt_stop' });
+    const teLock = await C[m2.id].wait(m => m.t === 'talk_end' && m.from === m1.id);
+    ok('再點一下結束鎖定講話（released，有時長）', teLock.reason === 'released' && teLock.mode === 'lock' && teLock.lastTalk && teLock.lastTalk.durMs >= 2000, JSON.stringify(teLock.lastTalk));
+    // 鎖定講話被主管插話
+    for (const c of Object.values(C)) c.clear();
+    await talk(C[m1.id], CH, 0, { mode: 'lock' }); C[m1.id].ws.send(tone(100));
+    const gSupL = await talk(C[sup.id], CH);
+    const revL = await C[m1.id].wait(m => m.t === 'floor_revoked' && m.reason === 'preempted');
+    ok('鎖定講話可被較高優先權插話並收到通知', gSupL.t === 'floor_granted' && revL.byName === '主管王');
+    C[sup.id].ws.send(tone(100)); C[sup.id].send({ t: 'ptt_stop' }); await C[m2.id].wait(m => m.t === 'talk_end' && m.from === sup.id);
+    // 聲控：不搶話
+    for (const c of Object.values(C)) c.clear();
+    await talk(C[m1.id], CH); C[m1.id].ws.send(tone(100));
+    const voxSup = await talk(C[sup.id], CH, 0, { mode: 'vox' });
+    ok('聲控不會插話（主管聲控遇到有人說話回 busy）', voxSup.t === 'floor_denied' && voxSup.reason === 'busy' && voxSup.mode === 'vox' && !C[m1.id].has(m => m.t === 'floor_revoked'));
+    C[m1.id].send({ t: 'ptt_stop' }); await C[m2.id].wait(m => m.t === 'talk_end' && m.from === m1.id);
+    // 聲控：說一段、停頓放掉、再說一段
+    for (const c of Object.values(C)) c.clear();
+    let voxOk = true;
+    for (let k = 0; k < 3; k++) {
+      const gv = await talk(C[m2.id], CH, 0, { mode: 'vox' });
+      const ts = await C[m1.id].wait(m => m.t === 'talk_start' && m.from === m2.id && m.mode === 'vox' && !m._seen); ts._seen = true;
+      for (let i = 0; i < 4; i++) { C[m2.id].ws.send(tone(100)); await sleep(80); }
+      C[m2.id].send({ t: 'ptt_stop' });
+      const te = await C[m1.id].wait(m => m.t === 'talk_end' && m.from === m2.id && !m._seen); te._seen = true;
+      voxOk = voxOk && gv.t === 'floor_granted' && gv.mode === 'vox' && te.reason === 'released' && te.mode === 'vox';
+      await sleep(150);
+    }
+    ok('聲控連續 3 段：每段都正常取得與放掉發言權', voxOk);
+    ok('聲控語音有轉發給同頻道', C[m1.id].bin.length >= 10 && C[lis.id].bin.length >= 10, `${C[m1.id].bin.length} 包`);
+    // 聲控被主管插話
+    for (const c of Object.values(C)) c.clear();
+    await talk(C[m2.id], CH, 0, { mode: 'vox' }); C[m2.id].ws.send(tone(100));
+    await talk(C[sup.id], CH);
+    const revV = await C[m2.id].wait(m => m.t === 'floor_revoked' && m.reason === 'preempted');
+    ok('聲控發話中可被較高優先權插話', !!revV);
+    C[sup.id].ws.send(tone(100)); C[sup.id].send({ t: 'ptt_stop' }); await C[m1.id].wait(m => m.t === 'talk_end' && m.from === sup.id);
+    // 鎖定講話中切換頻道 → 自動結束
+    for (const c of Object.values(C)) c.clear();
+    await talk(C[m1.id], CH, 0, { mode: 'lock' }); C[m1.id].ws.send(tone(100));
+    C[m1.id].send({ t: 'join', channel: 'lobby' });
+    const teSw = await C[m2.id].wait(m => m.t === 'talk_end' && m.from === m1.id);
+    ok('鎖定講話中切換頻道，發言權自動釋放', teSw.reason === 'left' || teSw.reason === 'switch', teSw.reason);
+    C[m1.id].send({ t: 'join', channel: CH }); await C[m1.id].wait(m => m.t === 'joined' && m.channel === CH);
+    // 鎖定講話中斷線 → 自動結束
+    for (const c of Object.values(C)) c.clear();
+    const X2 = await client(tok[m2.id], 'm2-第二連線');
+    X2.send({ t: 'join', channel: CH }); await X2.wait(m => m.t === 'joined' && m.channel === CH);
+    const gX = await talk(X2, CH, 0, { mode: 'lock' }); X2.ws.send(tone(100));
+    await C[m1.id].wait(m => m.t === 'talk_start' && m.from === m2.id);
+    X2.ws.terminate();
+    const teDc = await C[m1.id].wait(m => m.t === 'talk_end' && m.from === m2.id, 8000);
+    ok('鎖定講話中斷線，發言權自動釋放', gX.t === 'floor_granted' && (teDc.reason === 'disconnect' || teDc.reason === 'stalled'), teDc.reason);
+    await sleep(300);
+    // 單次發話上限：鎖定講話一直講，到上限伺服器收回並冷卻
+    for (const c of Object.values(C)) c.clear();
+    const t0Max = Date.now();
+    const gMax = await talk(C[m1.id], CH, 0, { mode: 'lock' });
+    let revMax = null;
+    while (Date.now() - t0Max < MAXMS + 8000) {
+      C[m1.id].ws.send(tone(100)); await sleep(200);
+      revMax = C[m1.id].msgs.find(m => m.t === 'floor_revoked'); if (revMax) break;
+    }
+    const elapsedMax = Date.now() - t0Max;
+    const teMax = await C[m2.id].wait(m => m.t === 'talk_end' && m.from === m1.id);
+    ok('鎖定講話到達上限由伺服器自動收回（timeout）', gMax.t === 'floor_granted' && revMax && revMax.reason === 'timeout' && revMax.maxMs === MAXMS && teMax.reason === 'timeout' && elapsedMax >= MAXMS - 1500 && elapsedMax <= MAXMS + 5000, `${elapsedMax} ms`);
+    if (CDMS > 0) {
+      const cd = await talk(C[m1.id], CH, 0, { mode: 'vox' });
+      ok('到上限後同一人立刻再要發言權被擋（cooldown）', cd.t === 'floor_denied' && cd.reason === 'cooldown' && cd.retryMs > 0 && cd.retryMs <= CDMS, JSON.stringify(cd));
+      const other = await talk(C[m2.id], CH);
+      ok('冷卻期間其他人可以馬上說話', other.t === 'floor_granted');
+      C[m2.id].ws.send(tone(100)); C[m2.id].send({ t: 'ptt_stop' }); await C[m1.id].wait(m => m.t === 'talk_end' && m.from === m2.id && m.reason === 'released');
+      await sleep(CDMS + 300);
+      const again = await talk(C[m1.id], CH, 0, { mode: 'lock' });
+      ok('冷卻結束後可以再講', again.t === 'floor_granted');
+      C[m1.id].ws.send(tone(100)); C[m1.id].send({ t: 'ptt_stop' }); await C[m2.id].wait(m => m.t === 'talk_end' && m.from === m1.id && m.reason === 'released');
+    }
+
     // ===== 位置與可見範圍 =====
     for (const c of [...Object.values(C), ADM]) c.clear();
     C[m1.id].send({ t: 'loc', lat: 25.0330, lng: 121.5654, acc: 15, battery: 0.82, charging: false });

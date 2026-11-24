@@ -9,7 +9,18 @@ const store = {
   get channel() { return localStorage.getItem('ptt_channel') || ''; }, set channel(v) { localStorage.setItem('ptt_channel', v || ''); },
   get shareLoc() { return localStorage.getItem('ptt_share_loc') === '1'; }, set shareLoc(v) { localStorage.setItem('ptt_share_loc', v ? '1' : '0'); },
   get org() { return localStorage.getItem('ptt_org') || ''; }, set org(v) { v ? localStorage.setItem('ptt_org', v) : localStorage.removeItem('ptt_org'); },
+  // 講話方式：hold＝按住講話、lock＝鎖定講話（點一下開始、再點一下停止）、vox＝聲控
+  get talkMode() { const v = localStorage.getItem('ptt_talk_mode'); return ['hold', 'lock', 'vox'].includes(v) ? v : 'hold'; }, set talkMode(v) { localStorage.setItem('ptt_talk_mode', v); },
+  get voxSens() { const v = parseInt(localStorage.getItem('ptt_vox_sens'), 10); return isNaN(v) ? 50 : Math.max(0, Math.min(100, v)); }, set voxSens(v) { localStorage.setItem('ptt_vox_sens', String(v)); },
 };
+const TALK_MODE_LABEL = { hold: '按住講話', lock: '鎖定講話', vox: '聲控' };
+const TAP_MS = 400;         // 鎖定模式：按下不到這個時間就放開＝鎖定；按久＝一般按住講話
+const VOX_ATTACK_MS = 80;   // 音量超過門檻持續這麼久才開始發話（避免短暫雜音）
+const VOX_HANG_MS = 900;    // 安靜這麼久才放掉發言權（句子間的停頓不會被切斷）
+const VOX_PREROLL = 3;      // 開始發話前先保留約 0.3 秒聲音，避免第一個字被吃掉
+// 靈敏度 0～100 → 門檻 -20 dB（只收大聲）～ -60 dB（很小聲也收）
+function voxThresholdDb() { return -20 - store.voxSens * 0.4; }
+function dbToPct(db) { return Math.max(0, Math.min(100, (db + 60) / 60 * 100)); }
 const ROLE_LABEL = { supervisor: '主管', member: '一般', listener: '只聽' };
 
 function redactClient(s) {
@@ -47,6 +58,10 @@ const S = {
   log: [], liveStreams: new Map(), lastTalk: {},
   activeTalks: new Map(),  // conv -> {from, fromName, streamId}
   pressing: false, granted: false, streamId: 0, pending: [], pendingConv: '',
+  talkKind: 'hold',        // 這次發話是 hold / lock / vox
+  locked: false,           // 鎖定講話中（不用按著）
+  talkStartedAt: 0, maxMs: 60000, talkTimer: null,
+  vox: { armed: false, conv: '', aboveSince: 0, lastLoud: 0, cooldownUntil: 0, needSilence: false, preroll: [] },
   alerts: new Map(), ackedAlerts: new Set(), locs: new Map(),
   chat: [], chatConv: '', chatQueue: [],
 };
@@ -184,19 +199,26 @@ async function ensureMic() {
   ds = makeDownsampler(c.sampleRate, SR);
   let acc = [], accLen = 0;
   micNode.onaudioprocess = (e) => {
-    if (!S.pressing) return;
+    const vox = S.vox.armed, testing = !!S.voxTesting;
+    if (!S.pressing && !vox && !testing) { if (acc.length) { acc = []; accLen = 0; } return; }
     const input = e.inputBuffer.getChannelData(0);
-    let peak = 0; for (let i = 0; i < input.length; i += 8) peak = Math.max(peak, Math.abs(input[i]));
-    $('#meterBar').style.width = Math.min(100, peak * 140) + '%';
+    let peak = 0, sum = 0; for (let i = 0; i < input.length; i += 4) { const v = input[i]; peak = Math.max(peak, Math.abs(v)); sum += v * v; }
+    const db = 20 * Math.log10(Math.sqrt(sum / Math.ceil(input.length / 4)) + 1e-9);
+    if (vox || testing) showVoxLevel(db); else $('#meterBar').style.width = Math.min(100, peak * 140) + '%';
+    if (vox) voxTick(db, performance.now());
+    if (!S.pressing && !vox) return;
     const out = ds(input); acc.push(out); accLen += out.length;
     if (accLen >= SR / 10) { // ~100ms
       const pkt = new Int16Array(accLen); let o = 0; for (const a of acc) { pkt.set(a, o); o += a.length; }
-      acc = []; accLen = 0; sendAudio(pkt);
+      acc = []; accLen = 0;
+      if (S.pressing) sendAudio(pkt);
+      else { S.vox.preroll.push(pkt); if (S.vox.preroll.length > VOX_PREROLL) S.vox.preroll.shift(); }
     }
   };
 }
 function releaseMicLater() {
   clearTimeout(micStopTimer);
+  if (S.vox.armed || S.voxTesting) return; // 聲控待命中要一直聽麥克風
   // 放開後保留 20 秒麥克風，連續對講不會每次重新要權限；之後關閉以釋放 iOS 的錄音狀態
   micStopTimer = setTimeout(() => { try { mic && mic.getTracks().forEach(t => t.stop()); micSrc && micSrc.disconnect(); micNode && micNode.disconnect(); } catch {} mic = null; micNode = null; }, 20000);
 }
@@ -224,29 +246,79 @@ function sendAudio(pkt) {
 const btn = $('#ptt');
 function myRoleHere() { if (!S.target || S.target.type === 'dm') return 'member'; const c = S.channels.find(x => x.id === S.target.id); return c ? c.myRole : null; }
 function myAlert() { for (const a of S.alerts.values()) if (a.userId === S.myId) return a; return null; }
-async function pttDown(e) {
-  e.preventDefault();
-  if (S.pressing || btn.disabled) return;
-  if (!S.connected) return toast('尚未連線');
-  unlockAudio();
-  const t = S.target; if (!t) return;
-  if (myRoleHere() === 'listener' && !myAlert()) { toast('你在這個頻道是「只聽」角色，不能發話'); return; }
+// 共用：要求發言權（按住、鎖定、聲控都走同一套 ptt_start / ptt_stop，所以優先插話、通話紀錄、字幕都照常運作）
+async function startTalk(kind) {
+  if (S.pressing || btn.disabled) return false;
+  if (!S.connected) { toast('尚未連線'); return false; }
+  const t = S.target; if (!t) return false;
+  if (myRoleHere() === 'listener' && !myAlert()) { if (kind !== 'vox') toast('你在這個頻道是「只聽」角色，不能發話'); return false; }
   const conv = t.type === 'dm' ? t.conv : t.id;
-  S.pressing = true; S.granted = false; S.pending = []; S.pendingConv = conv;
+  S.pressing = true; S.granted = false; S.pending = []; S.pendingConv = conv; S.talkKind = kind;
+  if (kind === 'vox') { S.pending = S.vox.preroll.splice(0); }
   btn.classList.add('pressing'); $('#pttText').textContent = '連線中…';
-  if (navigator.vibrate) navigator.vibrate(20);
-  wsSend(t.type === 'dm' ? { t: 'ptt_start', to: t.peerId } : { t: 'ptt_start', conv });
-  try { await ensureMic(); } catch (err) { toast('無法使用麥克風：' + (err.message || err.name)); pttUp(); }
+  if (navigator.vibrate && kind !== 'vox') navigator.vibrate(20);
+  wsSend(t.type === 'dm' ? { t: 'ptt_start', to: t.peerId, mode: kind } : { t: 'ptt_start', conv, mode: kind });
+  if (kind !== 'vox') { try { await ensureMic(); } catch (err) { toast('無法使用麥克風：' + (err.message || err.name)); stopTalk('mic'); return false; } }
+  return true;
 }
-function pttUp(e) {
-  if (e) e.preventDefault();
-  if (!S.pressing) return;
+function stopTalk(why) {
+  const wasLocked = S.locked; S.locked = false;
+  clearInterval(S.talkTimer); S.talkTimer = null;
+  btn.classList.remove('locked');
+  if (!S.pressing) { if (wasLocked) updateTalkStatus(); return; }
   S.pressing = false;
   wsSend({ t: 'ptt_stop' });
   S.granted = false; S.pending = [];
   stopCaptions();
-  btn.classList.remove('pressing', 'talking'); $('#meterBar').style.width = '0';
+  btn.classList.remove('pressing', 'talking', 'vox-talking'); if (!S.vox.armed) $('#meterBar').style.width = '0';
+  EventLog.add('talk', 'stop ' + S.talkKind + ' ' + (why || ''));
   releaseMicLater(); updateTalkStatus();
+}
+function talkLabel() {
+  const left = S.talkStartedAt ? Math.max(0, Math.ceil((S.maxMs - (Date.now() - S.talkStartedAt)) / 1000)) : 0;
+  const warn = S.talkStartedAt && left <= 10 ? `（剩 ${left} 秒）` : '';
+  if (S.talkKind === 'vox') return '🗣️ 聲控發話中' + warn;
+  if (S.locked) return '🔒 鎖定講話中' + warn + '\n再按一下結束';
+  return '說話中… 放開結束' + warn;
+}
+function refreshTalkingLabel() { if (S.granted) $('#pttText').textContent = talkLabel(); }
+// 按鈕：按住講話＝按住說；鎖定講話＝點一下鎖定、再點一下結束（按久仍是按住講話）；聲控＝點一下開/關聲控（按久＝臨時按住講話）
+const P = { down: false, downAt: 0, ignoreUp: false, holdTimer: null };
+async function pttDown(e) {
+  if (e) e.preventDefault();
+  if (P.down || btn.disabled) return;
+  P.down = true; P.downAt = Date.now(); P.ignoreUp = false;
+  unlockAudio();
+  const mode = store.talkMode;
+  if (S.locked || (S.pressing && S.talkKind === 'lock' && !S.granted && S.lockPending)) { stopTalk('unlock'); P.ignoreUp = true; return; }
+  if (mode === 'vox') {
+    if (S.pressing && S.talkKind === 'vox') { stopTalk('manual'); S.vox.needSilence = true; }
+    clearTimeout(P.holdTimer);
+    P.holdTimer = setTimeout(() => { if (P.down) { P.manual = true; startTalk('hold'); } }, TAP_MS);
+    return;
+  }
+  await startTalk(mode === 'lock' ? 'lock' : 'hold');
+}
+function pttUp(e) {
+  if (e) e.preventDefault();
+  if (!P.down) return;
+  P.down = false;
+  clearTimeout(P.holdTimer);
+  if (P.ignoreUp) { P.ignoreUp = false; return; }
+  const mode = store.talkMode, quick = Date.now() - P.downAt < TAP_MS;
+  if (mode === 'vox') {
+    if (P.manual) { P.manual = false; stopTalk('hold'); return; }
+    if (quick) toggleVox();
+    return;
+  }
+  if (mode === 'lock' && quick && S.pressing) {
+    S.locked = true; S.lockPending = !S.granted; btn.classList.add('locked');
+    if (navigator.vibrate) navigator.vibrate([20, 40, 20]);
+    if (S.granted) refreshTalkingLabel(); else $('#pttText').textContent = '🔒 鎖定中，等待發言權…';
+    EventLog.add('talk', 'locked');
+    return;
+  }
+  stopTalk('release');
 }
 btn.addEventListener('pointerdown', (e) => { btn.setPointerCapture && btn.setPointerCapture(e.pointerId); pttDown(e); });
 btn.addEventListener('pointerup', pttUp);
@@ -255,7 +327,79 @@ btn.addEventListener('lostpointercapture', pttUp);
 btn.addEventListener('contextmenu', (e) => e.preventDefault());
 document.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) && !$('#main').classList.contains('hidden')) pttDown(e); });
 document.addEventListener('keyup', (e) => { if (e.code === 'Space' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) pttUp(e); });
-window.addEventListener('blur', () => pttUp());
+// 視窗失焦：按住講話一定要停（放開事件可能收不到）；鎖定與聲控不受影響
+window.addEventListener('blur', () => { if (P.down) { P.down = false; clearTimeout(P.holdTimer); P.manual = false; } if (S.pressing && !S.locked && S.talkKind !== 'vox') stopTalk('blur'); });
+// 網頁切到背景：瀏覽器可能暫停麥克風，安全起見結束鎖定講話並關閉聲控
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'hidden') return;
+  if (S.pressing) stopTalk('background');
+  if (S.vox.armed) { disarmVox(); S.voxBgOff = true; }
+});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.voxBgOff) { S.voxBgOff = false; toast('網頁曾切到背景，聲控已自動關閉，需要時請再開啟'); } });
+
+// ---------- 聲控（VOX）----------
+function canVoxTalk() {
+  if (!S.connected || !S.target || btn.disabled) return false;
+  if (myRoleHere() === 'listener' && !myAlert()) return false;
+  const busy = S.activeTalks.get(currentConv());
+  return !(busy && busy.from !== S.myId); // 別人在說話時不觸發（也避免把喇叭聲當成自己說話）
+}
+function voxTick(db, t) {
+  const v = S.vox;
+  const loud = db > voxThresholdDb();
+  if (loud) v.lastLoud = t;
+  if (v.needSilence) { if (!loud && t - v.lastLoud > 1000) v.needSilence = false; v.aboveSince = 0; return; }
+  if (S.pressing) {
+    if (S.talkKind === 'vox' && t - v.lastLoud > VOX_HANG_MS) stopTalk('vox_hang');
+    return;
+  }
+  if (!loud) { v.aboveSince = 0; return; }
+  if (!v.aboveSince) v.aboveSince = t;
+  if (t - v.aboveSince >= VOX_ATTACK_MS && Date.now() >= v.cooldownUntil && canVoxTalk()) { v.aboveSince = 0; startTalk('vox'); }
+}
+async function armVox() {
+  if (S.vox.armed) return;
+  if (!S.target) return toast('請先加入頻道');
+  if (myRoleHere() === 'listener' && !myAlert()) return toast('你在這個頻道是「只聽」角色，不能使用聲控');
+  unlockAudio();
+  try { await ensureMic(); } catch (err) { return toast('無法使用麥克風：' + (err.message || err.name)); }
+  Object.assign(S.vox, { armed: true, conv: currentConv(), aboveSince: 0, lastLoud: 0, cooldownUntil: 0, needSilence: false, preroll: [] });
+  clearTimeout(micStopTimer);
+  EventLog.add('talk', 'vox armed');
+  renderVoxState(); updateTalkStatus();
+  toast('聲控已開啟：有說話聲就會自動發送');
+}
+function disarmVox(msg) {
+  if (!S.vox.armed) return;
+  S.vox.armed = false; S.vox.preroll = [];
+  if (S.pressing && S.talkKind === 'vox') stopTalk('vox_off');
+  EventLog.add('talk', 'vox off');
+  $('#meterBar').style.width = '0';
+  releaseMicLater(); renderVoxState(); updateTalkStatus();
+  if (msg) toast(msg);
+}
+function toggleVox() { if (S.vox.armed) disarmVox('聲控已關閉'); else armVox(); }
+function showVoxLevel(db) {
+  const pct = dbToPct(db) + '%', over = db > voxThresholdDb();
+  const mb = $('#meterBar'); mb.style.width = pct; mb.classList.toggle('over', over);
+  const sl = $('#voxLevel'); if (sl) { sl.style.width = pct; sl.classList.toggle('over', over); }
+}
+function renderVoxState() {
+  const thr = dbToPct(voxThresholdDb()) + '%';
+  const mt = $('#meterThr'); if (mt) { mt.style.left = thr; mt.classList.toggle('hidden', store.talkMode !== 'vox'); }
+  const st = $('#voxThr'); if (st) st.style.left = thr;
+  btn.classList.toggle('vox-armed', S.vox.armed);
+  const chip = $('#modeChip'); if (chip) chip.textContent = `講話方式：${TALK_MODE_LABEL[store.talkMode]}${store.talkMode === 'vox' ? (S.vox.armed ? '（開啟中）' : '（關閉）') : ''} ⚙`;
+}
+function setTalkMode(mode) {
+  if (!TALK_MODE_LABEL[mode]) return;
+  if (S.pressing) stopTalk('mode_change');
+  if (mode !== 'vox') disarmVox();
+  store.talkMode = mode;
+  document.querySelectorAll('#talkModeGrid [data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  $('#voxBox').classList.toggle('hidden', mode !== 'vox');
+  renderVoxState(); updateTalkStatus();
+}
 function flashBusy(name) {
   btn.classList.add('busy'); $('#pttText').textContent = `${name || '有人'} 正在說話`;
   if (navigator.vibrate) navigator.vibrate([30, 40, 30]);
@@ -422,9 +566,10 @@ function releaseTalkOnDisconnect() {
   const granted = S.granted;
   const was = S.pressing || S.granted;
   if (!was) return;
-  S.pressing = false; S.granted = false; S.pending = [];
+  S.pressing = false; S.granted = false; S.pending = []; S.locked = false;
+  clearInterval(S.talkTimer); S.talkTimer = null;
   stopCaptions();
-  btn.classList.remove('pressing', 'talking');
+  btn.classList.remove('pressing', 'talking', 'locked', 'vox-talking');
   $('#meterBar').style.width = '0';
   if (granted) toast('連線中斷，已安全結束發話（發言權已釋放）');
   else toast('連線中斷，發話尚未送出');
@@ -537,22 +682,41 @@ function handle(m) {
     case 'online': S.online = m.online; renderOthers(); renderMembers(); break;
     case 'floor_granted':
       if (!S.pressing || m.conv !== S.pendingConv) { wsSend({ t: 'ptt_stop' }); break; }
-      S.granted = true; S.streamId = m.streamId;
-      btn.classList.remove('pressing'); btn.classList.add('talking'); $('#pttText').textContent = '說話中… 放開結束';
+      S.granted = true; S.streamId = m.streamId; S.lockPending = false;
+      S.talkStartedAt = Date.now(); S.maxMs = m.maxMs || 60000;
+      clearInterval(S.talkTimer);
+      // 本機保險：伺服器沒收回時，超過上限 2 秒也會自己停
+      S.talkTimer = setInterval(() => { if (!S.granted) return; refreshTalkingLabel(); if (Date.now() - S.talkStartedAt > S.maxMs + 2000) { stopTalk('local_max'); toast(`已達單次發話上限 ${Math.round(S.maxMs / 1000)} 秒`); } }, 500);
+      btn.classList.remove('pressing'); btn.classList.add('talking'); btn.classList.toggle('vox-talking', S.talkKind === 'vox'); $('#pttText').textContent = talkLabel();
       for (const p of S.pending) S.ws.send(p.buffer); S.pending = [];
       if (navigator.vibrate) navigator.vibrate(40);
       try { startCaptions(m.conv); } catch (err) { console.warn("captions", err); }
       break;
     case 'floor_denied': {
-      const was = S.pressing; S.pressing = false; S.granted = false; S.pending = []; btn.classList.remove('pressing', 'talking'); releaseMicLater();
+      const was = S.pressing, kind = S.talkKind; S.pressing = false; S.granted = false; S.pending = []; S.locked = false; S.lockPending = false; btn.classList.remove('pressing', 'talking', 'locked', 'vox-talking'); releaseMicLater();
+      if (kind === 'vox' || m.mode === 'vox') {
+        // 聲控：不跳干擾提示，稍等再試；冷卻中則等冷卻結束並要求先安靜一下
+        S.vox.cooldownUntil = Date.now() + (m.reason === 'cooldown' ? (m.retryMs || 3000) : 1500);
+        if (m.reason === 'cooldown') S.vox.needSilence = true;
+        updateTalkStatus();
+        if (m.reason !== 'busy' && m.reason !== 'cooldown') toast('聲控無法發話：' + (m.reason === 'listen_only' ? '你是「只聽」角色' : m.reason === 'offline' ? '對方不在線' : m.reason));
+        break;
+      }
+      if (m.reason === 'cooldown') { updateTalkStatus(); toast(`剛達到發話上限，請等 ${Math.ceil((m.retryMs || 3000) / 1000)} 秒再講，讓其他人有機會說話`); break; }
       if (m.reason === 'busy') { if (was) flashBusy(m.byName); }
       else { updateTalkStatus(); toast(m.reason === 'offline' ? `${m.byName || '對方'} 目前不在線（不保存錄音，無法留言）` : m.reason === 'listen_only' ? '你在這個頻道是「只聽」角色，不能發話' : m.reason === 'no_access' ? '你沒有在這裡發話的權限' : '無法發話：' + m.reason); }
       break;
     }
-    case 'floor_revoked':
-      pttUp();
+    case 'floor_revoked': {
+      const kind = S.talkKind;
+      if (P.down) P.ignoreUp = true; // 還按著也要停，放開時不要再當成「點一下」
+      P.manual = false;
+      stopTalk('revoked ' + m.reason);
+      if (kind === 'vox' || S.vox.armed) { S.vox.needSilence = true; S.vox.cooldownUntil = Date.now() + (m.cooldownMs || 1500); }
       if (m.reason === 'preempted') { toast(`⚠️ 你的發話被 ${m.byName} 中斷（優先權較高）`); if (navigator.vibrate) navigator.vibrate([100, 50, 100]); }
-      else toast(m.reason === 'stalled' ? '網路不穩，語音中斷，已結束發話' : '已達單次發話上限 60 秒');
+      else toast(m.reason === 'stalled' ? '網路不穩，語音中斷，已結束發話' : `已達單次發話上限 ${Math.round((m.maxMs || S.maxMs || 60000) / 1000)} 秒，已自動結束，讓其他人說話`);
+      break;
+    }
       break;
     case 'talk_start':
       S.activeTalks.set(m.conv, { from: m.from, fromName: m.fromName, streamId: m.streamId, prio: m.prio });
@@ -639,7 +803,8 @@ function updateTalkStatus() {
   if (!S.pressing) {
     const busy = S.activeTalks.get(currentConv());
     btn.classList.toggle('busy', !!(busy && busy.from !== S.myId));
-    $('#pttText').textContent = listen ? '只聽（不能發話）' : busy && busy.from !== S.myId ? `${busy.fromName} 正在說話` : '按住講話';
+    const idle = store.talkMode === 'lock' ? '點一下開始講\n長按也能講' : store.talkMode === 'vox' ? (S.vox.armed ? '🎧 聲控待命中\n點一下關閉' : '點一下開啟聲控\n長按可直接講') : '按住講話';
+    $('#pttText').textContent = listen ? '只聽（不能發話）' : busy && busy.from !== S.myId ? `${busy.fromName} 正在說話` : idle;
   }
 }
 function renderTarget() {
@@ -648,6 +813,10 @@ function renderTarget() {
   const r = t && t.type === 'channel' ? myRoleHere() : null;
   const rb = $('#roleBadge'); rb.classList.toggle('hidden', !r); rb.className = 'role-badge ' + (r || '') + (r ? '' : ' hidden'); rb.textContent = r ? `我的角色：${ROLE_LABEL[r]}` : '';
   $('#backToChannel').classList.toggle('hidden', !(t && t.type === 'dm'));
+  // 換頻道／換私人對講：結束進行中的鎖定或聲控發話，聲控也關掉，避免講到別的頻道
+  const cc = currentConv();
+  if (S.pressing && S.pendingConv && S.pendingConv !== cc) stopTalk('switch');
+  if (S.vox.armed && S.vox.conv !== cc) disarmVox('已切換對話，聲控已關閉；需要時請再開啟');
   updatePttEnabled(); updateTalkStatus();
 }
 function renderChannels() {
@@ -786,6 +955,20 @@ async function sendChatPhoto(file) {
 }
 
 
+
+// ---------- 講話方式設定 ----------
+document.querySelectorAll('#talkModeGrid [data-mode]').forEach(b => b.addEventListener('click', () => { setTalkMode(b.dataset.mode); toast('講話方式：' + TALK_MODE_LABEL[b.dataset.mode]); }));
+$('#voxSens').value = store.voxSens; $('#voxSensVal').textContent = store.voxSens;
+$('#voxSens').addEventListener('input', () => { store.voxSens = +$('#voxSens').value; $('#voxSensVal').textContent = store.voxSens; renderVoxState(); });
+$('#voxTest').addEventListener('click', async () => {
+  if (S.voxTesting) { S.voxTesting = false; $('#voxTest').textContent = '測試麥克風音量'; $('#voxLevel').style.width = '0'; releaseMicLater(); return; }
+  unlockAudio();
+  try { await ensureMic(); } catch (err) { return toast('無法使用麥克風：' + (err.message || err.name)); }
+  S.voxTesting = true; $('#voxTest').textContent = '停止測試';
+  setTimeout(() => { if (S.voxTesting) $('#voxTest').click(); }, 30000);
+});
+$('#modeChip').addEventListener('click', () => { const b = document.querySelector('.tabs button[data-tab="settings"]'); if (b) b.click(); setTimeout(() => $('#talkModeSection').scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); });
+setTalkMode(store.talkMode);
 
 // ---------- 事件 ----------
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
