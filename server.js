@@ -1049,7 +1049,13 @@ setInterval(() => {
 
 (async () => {
   if (process.env.NEXT_DATABASE_URL && process.env.DATABASE_URL && process.env.NEXT_DATABASE_URL !== process.env.DATABASE_URL) {
-    await require('./lib/dbmigrate').migrateDb(process.env.DATABASE_URL, process.env.NEXT_DATABASE_URL);
+    // 新資料庫已有資料就不碰舊的（舊庫 12/10 到期後也能正常開機）。
+    // 搬移失敗時不要用空的新庫開機（會蓋掉資料），改回舊庫，下次開機再試。
+    try { await require('./lib/dbmigrate').migrateDb(process.env.DATABASE_URL, process.env.NEXT_DATABASE_URL); }
+    catch (e) {
+      if (!e.dstEmpty) throw e; // 新庫連不上或已有資料：不能退回舊庫，以免資料分岔
+      console.error('[dbmigrate] 搬移失敗，這次先用舊資料庫：', e.message); store.databaseUrl = process.env.DATABASE_URL;
+    }
   }
   await store.init();
   await media.init();
