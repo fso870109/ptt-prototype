@@ -33,7 +33,9 @@ const SESSION_DAYS = 30;
 const CH_ROLES = { supervisor: { label: '主管', prio: 3, talk: true }, member: { label: '一般', prio: 2, talk: true }, listener: { label: '只聽', prio: 0, talk: false } };
 const ALERT_PRIO = 100;
 
-const store = new Store({ databaseUrl: process.env.DATABASE_URL || '', dataDir: process.env.DATA_DIR || path.join(__dirname, 'data') });
+// 換資料庫：設了 NEXT_DATABASE_URL 就改用它；開機時先把舊 DATABASE_URL 的資料搬過去（只搬一次）
+const DB_URL = process.env.NEXT_DATABASE_URL || process.env.DATABASE_URL || '';
+const store = new Store({ databaseUrl: DB_URL, dataDir: process.env.DATA_DIR || path.join(__dirname, 'data') });
 const media = new Media(store);
 const reports = new Reports(store);
 const callLog = new CallLog(store);
@@ -1046,6 +1048,9 @@ setInterval(() => {
 }, 500);
 
 (async () => {
+  if (process.env.NEXT_DATABASE_URL && process.env.DATABASE_URL && process.env.NEXT_DATABASE_URL !== process.env.DATABASE_URL) {
+    await require('./lib/dbmigrate').migrateDb(process.env.DATABASE_URL, process.env.NEXT_DATABASE_URL);
+  }
   await store.init();
   await media.init();
   await reports.init();
